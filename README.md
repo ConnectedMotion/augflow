@@ -15,8 +15,9 @@
 	<img src="https://img.shields.io/github/license/eli64s/readme-ai?style=default&logo=opensourceinitiative&logoColor=white&color=4c3c84" alt="license">
 	<a href="https://"><img src="https://img.shields.io/badge/Last_Commit-November-4c3c84?logo=github" alt="Last Commit - November"></a>
     <a href="https://"><img src="https://img.shields.io/badge/Python-100%25-4c3c84?logo=Python" alt="Python - 100%"></a>
-    <a href="https://"><img src="https://img.shields.io/badge/Colab-Notebook-4c3c84?logo=googlecolab" alt="Colab - Notebook"></a>
-    <a href="https://"><img src="https://img.shields.io/badge/Kaggle-Notebook-4c3c84?logo=kaggle" alt="Kaggle - Notebook"></a>
+    <a href="https://colab.research.google.com/drive/1kEJ6SK68jwO3NzjooWa1esZgOJ8Rge2L?usp=sharing"><img src="https://img.shields.io/badge/Colab-Notebook-4c3c84?logo=googlecolab" alt="Colab - Notebook"></a>
+
+    
     
 </p>
 <p align="center"><!-- default option, no dependency badges. -->
