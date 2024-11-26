@@ -50,11 +50,7 @@ To explore how AugFlow builds diverse augmentation pipelines, refer to the **Flo
 
 </div>
 
-
-|         |           |         |           |         |
-|:-------:|:---------:|:-------:|:---------:|:-------:|
-|         |           | ![Flow Diagram](/assets/flow.png) |           |         |
-
+![Flow Diagram](/assets/flow.png)
 
 
 
