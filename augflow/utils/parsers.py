@@ -1,3 +1,5 @@
+# parsers.py
+
 import os
 import json
 import logging
@@ -7,8 +9,6 @@ from shapely.geometry import Polygon
 import glob
 import cv2
 import yaml
-
-
 
 class CocoParser:
     def __init__(self):
@@ -106,13 +106,25 @@ class CocoParser:
         logging.info(f"Loaded {len(dataset.images)} images and {len(dataset.annotations)} annotations from COCO format with task '{task}'.")
         return dataset, task
 
-    def save(self, dataset: UnifiedDataset, output_path: str, task: str):
+    def save(self, dataset: UnifiedDataset, output_path: str, task: str, reindex: bool = False):
         # Convert UnifiedDataset to COCO format
         coco = {
             'images': [],
             'annotations': [],
-            'categories': dataset.categories
+            'categories': []
         }
+
+        # Handle reindexing
+        if reindex:
+            # Reindex categories starting from zero
+            category_id_to_index = {cat['id']: idx for idx, cat in enumerate(sorted(dataset.categories, key=lambda x: x['id']))}
+            updated_categories = [{'id': idx, 'name': cat['name'], 'supercategory': cat.get('supercategory', 'none')} for idx, cat in enumerate(sorted(dataset.categories, key=lambda x: x['id']))]
+            dataset.categories = updated_categories
+        else:
+            # Keep original category IDs
+            category_id_to_index = {cat['id']: cat['id'] for cat in dataset.categories}
+
+        coco['categories'] = dataset.categories
 
         for img in dataset.images:
             coco_image = {
@@ -137,7 +149,7 @@ class CocoParser:
             coco_ann = {
                 'id': ann.id,
                 'image_id': ann.image_id,
-                'category_id': ann.category_id,
+                'category_id': category_id_to_index[ann.category_id],
                 'bbox': bbox,  # [x_min, y_min, width, height]
                 'area': ann.area,
                 'iscrowd': ann.iscrowd
@@ -170,10 +182,6 @@ class CocoParser:
                     logging.info(f"Copied image '{src_path}' to '{dst_path}'.")
                 except Exception as e:
                     logging.error(f"Failed to copy image '{src_path}' to '{dst_path}': {e}")
-
-
-
-
 
 class YoloParser:
     def __init__(self):
@@ -338,7 +346,7 @@ class YoloParser:
         logging.info(f"Loaded {len(dataset.images)} images and {len(dataset.annotations)} annotations from YOLO format with task '{task}'.")
         return dataset, task
 
-    def save(self, dataset: UnifiedDataset, output_path: str, task: str):
+    def save(self, dataset: UnifiedDataset, output_path: str, task: str, reindex: bool = False):
         """
         Save the UnifiedDataset to YOLO format.
 
@@ -346,26 +354,34 @@ class YoloParser:
             dataset (UnifiedDataset): The dataset to save.
             output_path (str): Path to save the YOLO dataset.
             task (str): 'detection' or 'segmentation'
+            reindex (bool): Whether to reindex category IDs starting from zero.
         """
         images_dir = os.path.join(output_path, 'images')
         labels_dir = os.path.join(output_path, 'labels')
         os.makedirs(images_dir, exist_ok=True)
         os.makedirs(labels_dir, exist_ok=True)
 
-        # Create a mapping from original category IDs to zero-based indices
-        category_id_to_index = {cat['id']: idx for idx, cat in enumerate(sorted(dataset.categories, key=lambda x: x['id']))}
-        # Update categories to have IDs starting from 0
-        updated_categories = [{'id': idx, 'name': cat['name'], 'supercategory': cat.get('supercategory', 'none')} for idx, cat in enumerate(sorted(dataset.categories, key=lambda x: x['id']))]
+        if reindex:
+            # Reindex categories starting from zero
+            category_id_to_index = {cat['id']: idx for idx, cat in enumerate(sorted(dataset.categories, key=lambda x: x['id']))}
+            updated_categories = [{'id': idx, 'name': cat['name'], 'supercategory': cat.get('supercategory', 'none')} for idx, cat in enumerate(sorted(dataset.categories, key=lambda x: x['id']))]
 
-        # Save data.yaml
-        data_yaml = {
-            'nc': len(updated_categories),
-            'names': [cat['name'] for cat in updated_categories]
-        }
-        data_yaml_path = os.path.join(output_path, 'data.yaml')
-        with open(data_yaml_path, 'w') as f:
-            yaml.dump(data_yaml, f)
-        logging.info(f"Saved YOLO data.yaml to '{data_yaml_path}'.")
+            # Save data.yaml
+            data_yaml = {
+                'nc': len(updated_categories),
+                'names': [cat['name'] for cat in updated_categories]
+            }
+            data_yaml_path = os.path.join(output_path, 'data.yaml')
+            with open(data_yaml_path, 'w') as f:
+                yaml.dump(data_yaml, f)
+            logging.info(f"Saved YOLO data.yaml to '{data_yaml_path}'.")
+
+            # Update categories in the dataset
+            dataset.categories = updated_categories
+        else:
+            # Keep original category IDs and do not save data.yaml
+            category_id_to_index = {cat['id']: cat['id'] for cat in dataset.categories}
+            logging.info("Data.yaml not saved because reindex is False.")
 
         for img in dataset.images:
             src_image_path = img.file_name
@@ -389,7 +405,7 @@ class YoloParser:
                     pass
                 else:
                     for ann in anns:
-                        # Map the category ID to zero-based index
+                        # Map the category ID
                         class_id = category_id_to_index[ann.category_id]
                         if task == 'detection':
                             # Convert polygon to bbox
@@ -419,5 +435,5 @@ class YoloParser:
                             lf.write(f"{class_id} {segmentation_str}\n")
             logging.info(f"Saved label file to '{label_file}'.")
 
-        # Update the dataset's categories to have IDs starting from 0
-        dataset.categories = updated_categories
+    
+

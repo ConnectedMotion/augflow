@@ -1,4 +1,3 @@
-
 import os
 import copy
 import logging
@@ -296,12 +295,13 @@ class Pipeline:
                 else:
                     ann.area = 0.0  # Default to zero area if no valid polygon
 
-    def merge_datasets(self, datasets_list: List[str]) -> UnifiedDataset:
+    def merge_datasets(self, datasets_list: List[str], reindex: bool = False) -> UnifiedDataset:
         """
         Merge multiple datasets.
 
         Args:
             datasets_list (List[str]): List of dataset IDs to merge.
+            reindex (bool): Whether to reindex category IDs starting from zero.
 
         Returns:
             UnifiedDataset: Merged dataset.
@@ -310,50 +310,90 @@ class Pipeline:
         image_id_offset = 0
         annotation_id_offset = 0
 
-        # Collect all categories
-        all_categories = {}
-        next_category_id = 0
-        category_id_mapping = {}  # Map original category IDs to new category IDs
+        if reindex:
+            # Reindex categories starting from zero
+            all_categories = {}
+            next_category_id = 0
+            category_id_mapping = {}  # Map original category IDs to new category IDs
 
-        for ds_id in datasets_list:
-            dataset_info = self.datasets[ds_id]
-            dataset = dataset_info['dataset']
+            for ds_id in datasets_list:
+                dataset_info = self.datasets[ds_id]
+                dataset = dataset_info['dataset']
 
-            # Remap category IDs
-            for cat in dataset.categories:
-                original_cat_id = cat['id']
-                if original_cat_id not in category_id_mapping:
-                    # Assign new category ID
-                    new_cat_id = next_category_id
-                    next_category_id += 1
-                    all_categories[new_cat_id] = {
-                        'id': new_cat_id,
-                        'name': cat['name'],
-                        'supercategory': cat.get('supercategory', 'none')
-                    }
-                    category_id_mapping[original_cat_id] = new_cat_id
+                # Remap category IDs
+                for cat in dataset.categories:
+                    original_cat_id = cat['id']
+                    if original_cat_id not in category_id_mapping:
+                        # Assign new category ID
+                        new_cat_id = next_category_id
+                        next_category_id += 1
+                        all_categories[new_cat_id] = {
+                            'id': new_cat_id,
+                            'name': cat['name'],
+                            'supercategory': cat.get('supercategory', 'none')
+                        }
+                        category_id_mapping[original_cat_id] = new_cat_id
 
-            # Create a mapping from old image ids to new image ids
-            image_id_mapping = {}
-            for img in dataset.images:
-                new_img = copy.deepcopy(img)
-                new_img.id = img.id + image_id_offset
-                merged_dataset.images.append(new_img)
-                image_id_mapping[img.id] = new_img.id
+                # Create a mapping from old image ids to new image ids
+                image_id_mapping = {}
+                for img in dataset.images:
+                    new_img = copy.deepcopy(img)
+                    new_img.id = img.id + image_id_offset
+                    merged_dataset.images.append(new_img)
+                    image_id_mapping[img.id] = new_img.id
 
-            for ann in dataset.annotations:
-                new_ann = copy.deepcopy(ann)
-                new_ann.id = ann.id + annotation_id_offset
-                new_ann.image_id = image_id_mapping.get(ann.image_id, ann.image_id)
-                # Update category ID
-                new_ann.category_id = category_id_mapping.get(ann.category_id, ann.category_id)
-                merged_dataset.annotations.append(new_ann)
+                for ann in dataset.annotations:
+                    new_ann = copy.deepcopy(ann)
+                    new_ann.id = ann.id + annotation_id_offset
+                    new_ann.image_id = image_id_mapping.get(ann.image_id, ann.image_id)
+                    # Update category ID
+                    new_ann.category_id = category_id_mapping.get(ann.category_id, ann.category_id)
+                    merged_dataset.annotations.append(new_ann)
 
-            # Update offsets
-            if dataset.images:
-                image_id_offset = max(img.id for img in merged_dataset.images) + 1
-            if dataset.annotations:
-                annotation_id_offset = max(ann.id for ann in merged_dataset.annotations) + 1
+                # Update offsets
+                if dataset.images:
+                    image_id_offset = max(img.id for img in merged_dataset.images) + 1
+                if dataset.annotations:
+                    annotation_id_offset = max(ann.id for ann in merged_dataset.annotations) + 1
+
+        else:
+            # Keep original category IDs
+            all_categories = {}
+            for ds_id in datasets_list:
+                dataset_info = self.datasets[ds_id]
+                dataset = dataset_info['dataset']
+
+                # Collect categories without reindexing
+                for cat in dataset.categories:
+                    cat_id = cat['id']
+                    if cat_id not in all_categories:
+                        all_categories[cat_id] = {
+                            'id': cat_id,
+                            'name': cat['name'],
+                            'supercategory': cat.get('supercategory', 'none')
+                        }
+
+                # Create a mapping from old image ids to new image ids
+                image_id_mapping = {}
+                for img in dataset.images:
+                    new_img = copy.deepcopy(img)
+                    new_img.id = img.id + image_id_offset
+                    merged_dataset.images.append(new_img)
+                    image_id_mapping[img.id] = new_img.id
+
+                for ann in dataset.annotations:
+                    new_ann = copy.deepcopy(ann)
+                    new_ann.id = ann.id + annotation_id_offset
+                    new_ann.image_id = image_id_mapping.get(ann.image_id, ann.image_id)
+                    # Keep original category ID
+                    new_ann.category_id = ann.category_id
+                    merged_dataset.annotations.append(new_ann)
+
+                # Update offsets
+                if dataset.images:
+                    image_id_offset = max(img.id for img in merged_dataset.images) + 1
+                if dataset.annotations:
+                    annotation_id_offset = max(ann.id for ann in merged_dataset.annotations) + 1
 
         # Assign merged categories
         merged_dataset.categories = list(all_categories.values())
@@ -366,7 +406,8 @@ class Pipeline:
         format: str,
         output_path: str,
         ignore_masks: bool = False,
-        visualize_annotations: bool = False
+        visualize_annotations: bool = False,
+        reindex: bool = False 
     ):
         """
         Output the augmented dataset in the specified format.
@@ -376,12 +417,13 @@ class Pipeline:
             output_path (str): Path to save the augmented dataset.
             ignore_masks (bool, optional): Whether to ignore masks (convert segmentation to bounding boxes).
             visualize_annotations (bool, optional): Whether to visualize annotations.
+            reindex (bool, optional): Whether to reindex category IDs starting from zero.
         """
         if not self.merged_dataset_ids:
             raise ValueError("No datasets marked for merging. Please set 'merge=True' in 'fuse' method.")
 
         # Merge datasets
-        merged_dataset = self.merge_datasets(self.merged_dataset_ids)
+        merged_dataset = self.merge_datasets(self.merged_dataset_ids, reindex=reindex)
 
         # If ignore_masks is True, convert polygons to bounding boxes
         if ignore_masks:
@@ -412,7 +454,7 @@ class Pipeline:
             raise NotImplementedError(f"Output format '{format}' is not supported.")
 
         # Save the dataset
-        parser.save(merged_dataset, output_path, task=task)
+        parser.save(merged_dataset, output_path, task=task, reindex=reindex)
         logging.info(f"Dataset saved in '{format}' format to '{output_path}' with task '{task}'.")
 
         # Handle visualization
