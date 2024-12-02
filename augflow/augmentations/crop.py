@@ -1,3 +1,5 @@
+# augflow/augmentations/crop.py
+
 import os
 import cv2
 import numpy as np
@@ -10,37 +12,36 @@ import logging
 from .base import Augmentation
 
 # Import helper functions from utils
-from augflow.utils.images import load_image, save_image, mosaic_visualize_transformed_overlays, crop_image
+from augflow.utils.images import load_image, save_image, mosaic_visualize_transformed_overlays
 from augflow.utils.unified_format import UnifiedDataset, UnifiedImage, UnifiedAnnotation
 import uuid
 from typing import Optional, List, Dict
-from augflow.utils.annotations import ensure_axis_aligned_rectangle, calculate_iou
+from augflow.utils.annotations import ensure_axis_aligned_rectangle, calculate_iou, calculate_area_reduction
 from augflow.utils.configs import crop_default_config
 
 
 class CropAugmentation(Augmentation):
-    def __init__(self, config=None, task: str = 'detection'):
+    def __init__(self, config=None, task: str = 'detection', modes: List[str] = None, focus_categories: Optional[List[str]] = None):
         super().__init__()
-        
-        self.config = crop_default_config.copy() 
+
+        self.config = crop_default_config.copy()
         if config:
             self.config.update(config)
         self.task = task.lower()
+        self.modes = [mode.lower() for mode in (modes or self.config.get('modes', []))]
+        self.focus_categories = focus_categories or self.config.get('focus_categories', [])
+
         random.seed(self.config.get('random_seed', 42))
         np.random.seed(self.config.get('random_seed', 42))
-        
+
         # Ensure output directories exist
         os.makedirs(self.config['output_images_dir'], exist_ok=True)
         if self.config.get('visualize_overlays') and self.config.get('output_visualizations_dir'):
             os.makedirs(self.config['output_visualizations_dir'], exist_ok=True)
-        
-        # Set max_clipped_area_per_category to default if not provided
-        if not self.config.get('max_clipped_area_per_category'):
-            # This will be handled in the apply method if not set
-            self.config['max_clipped_area_per_category'] = {}
-    
-    
-    
+
+        # Initialize max_clipped_area_per_category
+        self.max_clipped_area_per_category = self.config.get('max_clipped_area_per_category')
+
     def apply(self, dataset: UnifiedDataset, output_dim: Optional[tuple] = None) -> UnifiedDataset:
         if not self.config.get('enable_cropping', True):
             logging.info("Cropping augmentation is disabled.")
@@ -64,17 +65,15 @@ class CropAugmentation(Augmentation):
             image_id_to_annotations.setdefault(ann.image_id, []).append(ann)
 
         # Define max_clipped_area_per_category if not provided
-        max_clipped_area_per_category = self.config['max_clipped_area_per_category']
-        if not max_clipped_area_per_category:
-            # Assign a default value if not specified, e.g., 0.5 (99%) for all categories
-            max_clipped_area_per_category = {cat['id']: 0.5 for cat in dataset.categories}
+        if not self.max_clipped_area_per_category:
+            # Assign a default value if not specified, e.g., 0.5 (50%) for all categories
+            self.max_clipped_area_per_category = {cat['id']: 0.5 for cat in dataset.categories}
 
-        # Handle predefined_crops being None
-        predefined_crops = self.config.get('predefined_crops')
-        if predefined_crops is None:
-            predefined_crops = {}
+        max_clipped_area_per_category = self.max_clipped_area_per_category
 
-        # Iterate through each image
+        # Create mapping from category names to IDs
+        category_name_to_id = {cat['name']: cat['id'] for cat in dataset.categories}
+
         for img in dataset.images:
             image_path = img.file_name
             image = load_image(image_path)
@@ -83,507 +82,508 @@ class CropAugmentation(Augmentation):
                 continue
             img_h, img_w = image.shape[:2]
 
-            # Validate desired_output_size
-            if self.config['desired_output_size'] is not None:
-                if not (isinstance(self.config['desired_output_size'], tuple) and len(self.config['desired_output_size']) == 2):
-                    logging.error("desired_output_size must be a tuple of (width, height) or None.")
-                    continue
-                desired_w, desired_h = self.config['desired_output_size']
-                if desired_w <= 0 or desired_h <= 0:
-                    logging.error("desired_output_size dimensions must be positive integers.")
-                    continue
-            else:
-                desired_w, desired_h = img_w, img_h  # Use original size for reference
+            anns = image_id_to_annotations.get(img.id, [])
 
-            # Create Shapely polygon for image boundaries
-            image_boundary = box(0, 0, img_w, img_h)
-
-            # Determine number of augmentations for this image
-            num_crops = self.config['num_crops_per_image']
-
-            # Initialize list to keep track of existing crop bounding boxes for overlap control
-            existing_crops = []
-
-            # Initialize list to hold crops
-            crops = []
-
-            # Check if systematic crops are enabled
-            if self.config.get('systematic_crops', False):
-                sys_params = self.config.get('systematic_crops_parameters', {})
-                mode = sys_params.get('mode', 'largest')
-                margin = sys_params.get('margin', 50)  # Default margin is 50 pixels
-                if mode == 'largest':
-                    # Find the largest polygon in the image
-                    anns = image_id_to_annotations.get(img.id, [])
-                    if not anns:
-                        logging.info(f"No annotations found for image ID {img.id}. Skipping systematic cropping.")
-                        continue
-
-                    # Find the annotation with the largest area
-                    max_area = 0
-                    largest_ann = None
-                    for ann in anns:
-                        coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
-                        if not coords:
-                            continue
-                        polygon = Polygon(coords)
-                        if not polygon.is_valid:
-                            polygon = polygon.buffer(0)
-                        area = polygon.area
-                        if area > max_area:
-                            max_area = area
-                            largest_ann = ann
-
-                    if largest_ann is None:
-                        logging.info(f"No valid polygons found for image ID {img.id}. Skipping systematic cropping.")
-                        continue
-
-                    # Create a crop around the largest polygon
-                    coords = list(zip(largest_ann.polygon[0::2], largest_ann.polygon[1::2]))
-                    polygon = Polygon(coords)
-                    minx, miny, maxx, maxy = polygon.bounds
-
-                    # Expand the bounds by margin, ensuring within image boundaries
-                    x1 = int(minx) - margin
-                    y1 = int(miny) - margin
-                    x2 = int(maxx) + margin
-                    y2 = int(maxy) + margin
-
-                    # Clip to image boundaries
-                    x1 = max(x1, 0)
-                    y1 = max(y1, 0)
-                    x2 = min(x2, img_w)
-                    y2 = min(y2, img_h)
-
-                    w = x2 - x1
-                    h = y2 - y1
-
-                    crops = [(x1, y1, w, h)]
-                elif mode == 'categories':
-                    categories_to_focus = sys_params.get('categories', [])
-                    if not categories_to_focus:
-                        logging.info(f"No categories specified for systematic cropping in 'categories' mode. Skipping systematic cropping.")
-                        continue
-                    margin = sys_params.get('margin', 50)  # Default margin is 50 pixels
-
-                    # Find annotations belonging to the specified categories
-                    anns = image_id_to_annotations.get(img.id, [])
-                    crops = []
-                    for ann in anns:
-                        if ann.category_id in categories_to_focus:
-                            coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
-                            if not coords:
-                                continue
-                            polygon = Polygon(coords)
-                            if not polygon.is_valid:
-                                polygon = polygon.buffer(0)
-                            minx, miny, maxx, maxy = polygon.bounds
-
-                            # Expand the bounds by margin, ensuring within image boundaries
-                            x1 = int(minx) - margin
-                            y1 = int(miny) - margin
-                            x2 = int(maxx) + margin
-                            y2 = int(maxy) + margin
-
-                            # Clip to image boundaries
-                            x1 = max(x1, 0)
-                            y1 = max(y1, 0)
-                            x2 = min(x2, img_w)
-                            y2 = min(y2, img_h)
-
-                            w = x2 - x1
-                            h = y2 - y1
-
-                            crops.append((x1, y1, w, h))
-
-                    if not crops:
-                        logging.info(f"No annotations found for specified categories in image ID {img.id}. Skipping systematic cropping.")
-                        continue
-                else:
-                    logging.warning(f"Unsupported systematic cropping mode '{mode}'. Skipping systematic cropping.")
-                    continue
-            else:
-                # Generate crops based on crop_modes
-                for crop_mode in self.config['crop_modes']:
-                    params = self.config['crop_size_parameters'].get(crop_mode, {})
-                    if crop_mode == 'fixed_size':
-                        w = params.get('crop_width', 800)
-                        h = params.get('crop_height', 800)
-                        if w <= 0 or h <= 0:
-                            logging.warning(f"Invalid crop size for 'fixed_size': width={w}, height={h}. Skipping this mode.")
-                            continue
-                        # Adjust aspect ratio if needed
-                        if self.config['aspect_ratio_parameters']['preserve_aspect_ratio']:
-                            target_ratio = self.config['aspect_ratio_parameters']['target_aspect_ratio'][0] / self.config['aspect_ratio_parameters']['target_aspect_ratio'][1]
-                            current_ratio = w / h
-                            if current_ratio > target_ratio:
-                                w = int(h * target_ratio)
-                            else:
-                                h = int(w / target_ratio)
-                        # Randomly position the fixed-size crop
-                        if img_w > w:
-                            x = random.randint(0, img_w - w)
-                        else:
-                            x = 0
-                        if img_h > h:
-                            y = random.randint(0, img_h - h)
-                        else:
-                            y = 0
-                        crops.append((int(x), int(y), int(w), int(h)))
-                    elif crop_mode == 'random_area':
-                        min_area_ratio = params.get('min_area_ratio', 0.5)
-                        max_area_ratio = params.get('max_area_ratio', 0.9)
-                        if not (0 < min_area_ratio <= max_area_ratio < 1):
-                            logging.warning(f"Invalid area ratios for 'random_area': min={min_area_ratio}, max={max_area_ratio}. Skipping this mode.")
-                            continue
-                        area_ratio = random.uniform(min_area_ratio, max_area_ratio)
-                        crop_area = area_ratio * img_w * img_h
-                        if self.config['aspect_ratio_parameters']['preserve_aspect_ratio']:
-                            target_ratio = self.config['aspect_ratio_parameters']['target_aspect_ratio'][0] / self.config['aspect_ratio_parameters']['target_aspect_ratio'][1]
-                        else:
-                            target_ratio = random.uniform(0.5, 2.0)
-                        w = int(np.sqrt(crop_area * target_ratio))
-                        h = int(np.sqrt(crop_area / target_ratio))
-                        w = min(w, img_w)
-                        h = min(h, img_h)
-                        if img_w > w:
-                            x = random.randint(0, img_w - w)
-                        else:
-                            x = 0
-                        if img_h > h:
-                            y = random.randint(0, img_h - h)
-                        else:
-                            y = 0
-                        crops.append((int(x), int(y), int(w), int(h)))
-                    elif crop_mode == 'random_aspect':
-                        min_ar = params.get('min_aspect_ratio', 0.75)
-                        max_ar = params.get('max_aspect_ratio', 1.33)
-                        if not (0 < min_ar <= max_ar):
-                            logging.warning(f"Invalid aspect ratios for 'random_aspect': min={min_ar}, max={max_ar}. Skipping this mode.")
-                            continue
-                        target_ratio = random.uniform(min_ar, max_ar)
-                        crop_area = random.uniform(0.5, 0.9) * img_w * img_h
-                        w = int(np.sqrt(crop_area * target_ratio))
-                        h = int(np.sqrt(crop_area / target_ratio))
-                        w = min(w, img_w)
-                        h = min(h, img_h)
-                        if img_w > w:
-                            x = random.randint(0, img_w - w)
-                        else:
-                            x = 0
-                        if img_h > h:
-                            y = random.randint(0, img_h - h)
-                        else:
-                            y = 0
-                        crops.append((int(x), int(y), int(w), int(h)))
-                    elif crop_mode == 'predefined':
-                        predefined = predefined_crops.get(str(img.id), [])
-                        if not isinstance(predefined, list):
-                            logging.warning(f"Predefined crops for image ID {img.id} are not in a list format. Skipping these crops.")
-                            continue
-                        for predefined_crop in predefined:
-                            if not (isinstance(predefined_crop, tuple) and len(predefined_crop) == 4):
-                                logging.warning(f"Invalid predefined crop format: {predefined_crop}. Skipping this crop.")
-                                continue
-                            x_p, y_p, w_p, h_p = predefined_crop
-                            if w_p <= 0 or h_p <= 0:
-                                logging.warning(f"Invalid predefined crop size: width={w_p}, height={h_p}. Skipping this crop.")
-                                continue
-                            # Adjust aspect ratio if needed
-                            if self.config['aspect_ratio_parameters']['preserve_aspect_ratio']:
-                                target_ratio = self.config['aspect_ratio_parameters']['target_aspect_ratio'][0] / self.config['aspect_ratio_parameters']['target_aspect_ratio'][1]
-                                current_ratio = w_p / h_p
-                                if current_ratio > target_ratio:
-                                    w_p = int(h_p * target_ratio)
-                                else:
-                                    h_p = int(w_p / target_ratio)
-                            crops.append((int(x_p), int(y_p), int(w_p), int(h_p)))
-                    elif crop_mode == 'grid':
-                        grid_rows = params.get('grid_rows', 2)
-                        grid_cols = params.get('grid_cols', 2)
-                        if not (isinstance(grid_rows, int) and grid_rows > 0 and isinstance(grid_cols, int) and grid_cols > 0):
-                            logging.warning(f"Invalid grid parameters: rows={grid_rows}, cols={grid_cols}. Skipping this mode.")
-                            continue
-                        grid_w = img_w // grid_cols
-                        grid_h = img_h // grid_rows
-                        for row in range(grid_rows):
-                            for col in range(grid_cols):
-                                x = col * grid_w
-                                y = row * grid_h
-                                w = grid_w
-                                h = grid_h
-                                # Adjust aspect ratio if needed
-                                if self.config['aspect_ratio_parameters']['preserve_aspect_ratio']:
-                                    target_ratio = self.config['aspect_ratio_parameters']['target_aspect_ratio'][0] / self.config['aspect_ratio_parameters']['target_aspect_ratio'][1]
-                                    current_ratio = w / h
-                                    if current_ratio > target_ratio:
-                                        w = int(h * target_ratio)
-                                    else:
-                                        h = int(w / target_ratio)
-                                crops.append((int(x), int(y), int(w), int(h)))
-                    elif crop_mode == 'sliding_window':
-                        window_size = params.get('window_size', (400, 400))
-                        step_size = params.get('step_size', (200, 200))
-                        if not (isinstance(window_size, tuple) and len(window_size) == 2 and
-                                isinstance(step_size, tuple) and len(step_size) == 2):
-                            logging.warning(f"Invalid sliding_window parameters: window_size={window_size}, step_size={step_size}. Skipping this mode.")
-                            continue
-                        win_w, win_h = window_size
-                        step_w, step_h = step_size
-                        if win_w <= 0 or win_h <= 0 or step_w <= 0 or step_h <= 0:
-                            logging.warning(f"Invalid window or step sizes: window_size={window_size}, step_size={step_size}. Skipping this mode.")
-                            continue
-                        for y_start in range(0, img_h - win_h + 1, step_h):
-                            for x_start in range(0, img_w - win_w + 1, step_w):
-                                x = x_start
-                                y = y_start
-                                w = win_w
-                                h = win_h
-                                # Adjust aspect ratio if needed
-                                if self.config['aspect_ratio_parameters']['preserve_aspect_ratio']:
-                                    target_ratio = self.config['aspect_ratio_parameters']['target_aspect_ratio'][0] / self.config['aspect_ratio_parameters']['target_aspect_ratio'][1]
-                                    current_ratio = w / h
-                                    if current_ratio > target_ratio:
-                                        w_adj = int(h * target_ratio)
-                                        h_adj = h
-                                    else:
-                                        w_adj = w
-                                        h_adj = int(w / target_ratio)
-                                    crops.append((int(x), int(y), int(w_adj), int(h_adj)))
-                                else:
-                                    crops.append((int(x), int(y), int(w), int(h)))
-                    else:
-                        logging.warning(f"Unsupported crop mode '{crop_mode}'. Skipping.")
-                        continue
-
-                if not crops:
-                    logging.warning(f"No valid crops generated for image ID {img.id}. Skipping this image.")
-                    continue
-
-                # Shuffle crops to introduce randomness
-                random.shuffle(crops)
-
-                # Limit the number of crops
-                crops = crops[:num_crops]
-
-            # Process each crop
-            for crop_coords in crops:
-                x, y, w, h = crop_coords
-
-                # Check minimum crop size
-                min_crop_size = self.config.get('min_crop_size', 256)
-                if w < min_crop_size or h < min_crop_size:
-                    logging.info(f"Crop size ({w}, {h}) is smaller than min_crop_size ({min_crop_size}). Skipping this crop.")
-                    continue  # Skip this crop
-
-                # Check for overlap with existing crops
-                new_crop_bbox = [x, y, w, h]
-                overlap = False
-                for existing_crop in existing_crops:
-                    existing_bbox = existing_crop
-                    iou = calculate_iou(new_crop_bbox, existing_bbox)
-                    if iou > self.config['overlap_parameters']['max_overlap']:
-                        overlap = True
-                        logging.info(f"New crop {new_crop_bbox} overlaps with existing crop {existing_bbox} (IoU={iou:.2f}) exceeding max_overlap={self.config['overlap_parameters']['max_overlap']}. Skipping this crop.")
-                        break
-                if overlap:
-                    continue  # Skip this crop due to overlap
-
-                # Crop the image and pad to desired size if specified
-                cropped_image, pad_left_total, pad_top_total, resize_factors = crop_image(
-                    image=image,
-                    crop_coords=(x, y, w, h),
-                    desired_output_size=self.config['desired_output_size'],
-                    clipping_mode=self.config['clipping_parameters']['clipping_mode'],
-                    padding_color=self.config['clipping_parameters']['padding_color']
+            if 'targeted' in self.modes:
+                self.apply_targeted(
+                    img, image, anns, img_w, img_h, image_id_offset, annotation_id_offset,
+                    augmented_dataset, max_clipped_area_per_category, category_name_to_id
                 )
+                # Update offsets
+                image_id_offset = max([img.id for img in augmented_dataset.images], default=image_id_offset) + 1
+                annotation_id_offset = max([ann.id for ann in augmented_dataset.annotations], default=annotation_id_offset) + 1
 
-                if cropped_image is None:
-                    continue  # Skip this crop due to clipping_mode 'ignore' or other issues
+            if 'non_targeted' in self.modes:
+                # Implement non-targeted mode if needed
+                pass  # Currently focusing on targeted mode as per your requirement
 
-                # Scale factors
-                scale_x, scale_y = resize_factors
-
-                # Process annotations for this image
-                anns = image_id_to_annotations.get(img.id, [])
-                discard_augmentation = False  # Flag to decide whether to discard augmentation
-
-                # List to hold cropped annotations temporarily
-                temp_cropped_annotations = []
-
-                for ann in anns:
-                    # Original coordinates
-                    coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
-                    if not coords:
-                        continue  # Skip if coordinates are invalid
-
-                    original_polygon = Polygon(coords)
-                    if not original_polygon.is_valid:
-                        original_polygon = original_polygon.buffer(0)
-                    original_area = original_polygon.area
-
-                    # Adjust coordinates based on crop
-                    adjusted_coords = []
-                    for px, py in coords:
-                        new_px = px - x + pad_left_total
-                        new_py = py - y + pad_top_total
-                        adjusted_coords.append((new_px, new_py))
-
-                    # Apply scaling factors if any
-                    if scale_x != 1 or scale_y != 1:
-                        scaled_coords = [(px * scale_x, py * scale_y) for px, py in adjusted_coords]
-                    else:
-                        scaled_coords = adjusted_coords
-
-                    adjusted_polygon = Polygon(scaled_coords)
-                    if not adjusted_polygon.is_valid:
-                        adjusted_polygon = adjusted_polygon.buffer(0)
-                    adjusted_area = adjusted_polygon.area
-
-                    # Compute area reduction due to scaling
-                    if original_area > 0:
-                        area_reduction_due_to_scaling = max(0.0, (original_area - adjusted_area) / original_area)
-                    else:
-                        area_reduction_due_to_scaling = 0.0
-
-                    # Define the crop boundary (image boundary)
-                    crop_boundary = box(0, 0, cropped_image.shape[1], cropped_image.shape[0])
-
-                    # Clip the adjusted polygon to the crop boundary
-                    clipped_polygon = adjusted_polygon.intersection(crop_boundary)
-
-                    if clipped_polygon.is_empty:
-                        continue  # Polygon is completely outside; exclude it
-
-                    if not clipped_polygon.is_valid:
-                        clipped_polygon = clipped_polygon.buffer(0)
-                    clipped_area = clipped_polygon.area
-
-                    # Compute area reduction due to clipping
-                    if adjusted_area > 0:
-                        area_reduction_due_to_clipping = max(0.0, (adjusted_area - clipped_area) / adjusted_area)
-                    else:
-                        area_reduction_due_to_clipping = 0.0
-
-                    # Total area reduction
-                    if original_area > 0:
-                        total_area_reduction = max(0.0, (original_area - clipped_area) / original_area)
-                    else:
-                        total_area_reduction = 0.0
-
-                    # Check if area reduction exceeds the threshold
-                    category_id = ann.category_id
-                    max_allowed_reduction = max_clipped_area_per_category.get(category_id, 0.99)  # 99% default
-
-                    if total_area_reduction > max_allowed_reduction:
-                        discard_augmentation = True
-                        logging.warning(f"Crop {crop_coords} for image ID {img.id} discarded due to total area reduction ({total_area_reduction:.6f}) exceeding threshold ({max_allowed_reduction}) for category {category_id}.")
-                        break  # Discard the entire augmentation
-
-                    # Determine if polygon was scaled
-                    is_polygon_scaled = area_reduction_due_to_scaling > 0.01
-
-                    # Determine if polygon was clipped
-                    is_polygon_clipped = area_reduction_due_to_clipping > 0.01
-
-                    # Handle MultiPolygon cases
-                    polygons_to_process = []
-                    if isinstance(clipped_polygon, Polygon):
-                        polygons_to_process.append(clipped_polygon)
-                    elif isinstance(clipped_polygon, MultiPolygon):
-                        polygons_to_process.extend(clipped_polygon.geoms)
-                    else:
-                        logging.warning(f"Unknown geometry type for clipped polygon: {type(clipped_polygon)}")
-                        continue
-
-                    # For detection task, we only need the bounding box of the polygon(s)
-                    cleaned_polygon_coords = []
-                    for poly in polygons_to_process:
-                        if self.task == 'detection':
-                            coords = ensure_axis_aligned_rectangle(list(poly.exterior.coords))
-                            if coords:
-                                cleaned_polygon_coords.extend(coords)
-                        else:
-                            coords = list(poly.exterior.coords)
-                            if coords:
-                                cleaned_polygon_coords.extend(coords)
-
-                    if not cleaned_polygon_coords:
-                        logging.debug(f"No valid coordinates found after processing clipped polygons. Skipping.")
-                        continue
-
-                    # Assign area reductions and flags
-                    cleaned_ann = UnifiedAnnotation(
-                        id=annotation_id_offset,
-                        image_id=image_id_offset,
-                        category_id=ann.category_id,
-                        polygon=[coord for point in cleaned_polygon_coords for coord in point],
-                        iscrowd=ann.iscrowd,
-                        area=clipped_area,
-                        is_polygon_scaled=is_polygon_scaled,
-                        is_polygon_clipped=is_polygon_clipped,
-                        area_reduction_due_to_scaling=area_reduction_due_to_scaling,
-                        area_reduction_due_to_clipping=area_reduction_due_to_clipping
-                    )
-
-                    temp_cropped_annotations.append(cleaned_ann)
-                    annotation_id_offset += 1
-
-                if discard_augmentation:
-                    logging.info(f"Cropping augmentation for image ID {img.id} discarded due to high area reduction.")
-                    continue  # Skip this augmentation
-
-                # If no polygons remain after excluding those completely outside, skip augmentation
-                if not temp_cropped_annotations:
-                    logging.info(f"Cropping augmentation with crop {crop_coords} for image ID {img.id} results in all polygons being completely outside. Skipping augmentation.")
-                    continue
-
-                # Generate unique filename using UUID to prevent collisions
-                filename, ext = os.path.splitext(os.path.basename(img.file_name))
-                new_filename = f"{filename}_crop_{uuid.uuid4().hex}{ext}"
-                output_image_path = os.path.join(self.config['output_images_dir'], new_filename)
-
-                # Save cropped and padded image
-                save_success = save_image(cropped_image, output_image_path)
-                if not save_success:
-                    logging.error(f"Failed to save cropped image '{output_image_path}'. Skipping this augmentation.")
-                    continue
-
-                # Add the new crop's bounding box to existing_crops for overlap control
-                existing_crops.append(new_crop_bbox)
-
-                # Create new image entry
-                new_img = UnifiedImage(
-                    id=image_id_offset,
-                    file_name=output_image_path,
-                    width=cropped_image.shape[1],
-                    height=cropped_image.shape[0]
-                )
-                augmented_dataset.images.append(new_img)
-
-                # Process and save cropped annotations
-                for cropped_ann in temp_cropped_annotations:
-                    augmented_dataset.annotations.append(cropped_ann)
-                    logging.info(f"Added annotation ID {cropped_ann.id} for image ID {image_id_offset}.")
-
-                # Visualization
-                if self.config['visualize_overlays'] and self.config['output_visualizations_dir']:
-                    os.makedirs(self.config['output_visualizations_dir'], exist_ok=True)
-                    visualization_filename = f"{os.path.splitext(new_filename)[0]}_viz.jpg"
-                    mosaic_visualize_transformed_overlays(
-                        transformed_image=cropped_image.copy(),
-                        cleaned_annotations=temp_cropped_annotations,
-                        output_visualizations_dir=self.config['output_visualizations_dir'],
-                        new_filename=visualization_filename,
-                        task=self.task  # Pass the task ('detection' or 'segmentation')
-                    )
-
-                logging.info(f"Cropped image '{new_filename}' saved with {len(temp_cropped_annotations)} annotations.")
-                image_id_offset += 1
-
+        logging.info(f"Cropping augmentation completed.")
         return augmented_dataset
 
+    def apply_targeted(self, img, image, anns, img_w, img_h, image_id_offset, annotation_id_offset,
+                       augmented_dataset, max_clipped_area_per_category, category_name_to_id):
+        if not self.focus_categories:
+            logging.warning("No focus categories provided for targeted mode.")
+            return
+
+        focus_category_ids = [category_name_to_id[cat_name] for cat_name in self.focus_categories if cat_name in category_name_to_id]
+        if not focus_category_ids:
+            logging.warning("Focus categories do not match any categories in the dataset.")
+            return
+
+        # Find annotations belonging to focus categories
+        focus_anns = [ann for ann in anns if ann.category_id in focus_category_ids]
+        if not focus_anns:
+            logging.info(f"No focus category annotations in image ID {img.id}. Skipping targeted cropping.")
+            return
+
+        # Sort focus annotations based on the order of focus_categories
+        focus_anns.sort(key=lambda ann: self.focus_categories.index(
+            [cat_name for cat_name, cat_id in category_name_to_id.items() if cat_id == ann.category_id][0]
+        ))
+
+        num_crops = self.config['num_crops_per_image']
+        image_successful_aug = 0
+
+        for ann in focus_anns:
+            if image_successful_aug >= num_crops:
+                break
+
+            # Calculate significant clipping just below max allowed
+            max_allowed_reduction = max_clipped_area_per_category.get(ann.category_id, 0.5)  # Default to 50%
+            target_area_reduction = max_allowed_reduction * 0.9  # 90% of max allowed
+
+            # Compute the original polygon
+            coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
+            if not coords:
+                continue
+            polygon = Polygon(coords)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            original_area = polygon.area
+
+            # Start with the bounding box of the polygon
+            minx, miny, maxx, maxy = polygon.bounds
+
+            # Initialize crop box as the bounding box of the polygon
+            x_left = minx
+            x_right = maxx
+            y_top = miny
+            y_bottom = maxy
+
+            # Expand the crop box to the maximum possible size while maintaining the area reduction constraint
+            expansion_step = max(img_w, img_h) // 100  # Define an expansion step
+
+            success = False
+            best_crop_box = None
+            largest_area = 0
+
+            for expand in range(0, max(img_w, img_h), expansion_step):
+                # Expand in all directions
+                x1 = max(0, x_left - expand)
+                x2 = min(img_w, x_right + expand)
+                y1 = max(0, y_top - expand)
+                y2 = min(img_h, y_bottom + expand)
+
+                # Adjust to make the crop box square if possible
+                w = x2 - x1
+                h = y2 - y1
+                if self.config.get('prefer_square', False):
+                    if w != h:
+                        size = max(w, h)
+                        x_center = (x1 + x2) / 2
+                        y_center = (y1 + y2) / 2
+                        x1 = max(0, x_center - size / 2)
+                        x2 = min(img_w, x_center + size / 2)
+                        y1 = max(0, y_center - size / 2)
+                        y2 = min(img_h, y_center + size / 2)
+                        w = x2 - x1
+                        h = y2 - y1
+
+                crop_box = box(x1, y1, x2, y2)
+                cropped_polygon = polygon.intersection(crop_box)
+                if cropped_polygon.is_empty or not cropped_polygon.is_valid:
+                    continue
+                clipped_area = cropped_polygon.area
+                area_reduction = calculate_area_reduction(original_area, clipped_area)
+                if area_reduction >= target_area_reduction and area_reduction < max_allowed_reduction:
+                    crop_area = w * h
+                    if crop_area > largest_area:
+                        largest_area = crop_area
+                        best_crop_box = (int(x1), int(y1), int(w), int(h))
+                        best_area_reduction = area_reduction
+                        success = True
+                elif area_reduction >= max_allowed_reduction:
+                    break  # Exceeds max allowed reduction, stop expanding
+
+            if not success or best_crop_box is None:
+                logging.info(f"Could not find suitable crop for annotation ID {ann.id} in image ID {img.id}.")
+                continue
+
+            # Crop the image using the best crop box
+            x, y, w, h = best_crop_box
+            cropped_image = image[y:y+h, x:x+w]
+
+            # Adjust annotations
+            new_annotations = []
+            for ann_orig in anns:
+                coords = list(zip(ann_orig.polygon[0::2], ann_orig.polygon[1::2]))
+                if not coords:
+                    continue
+                polygon_orig = Polygon(coords)
+                if not polygon_orig.is_valid:
+                    polygon_orig = polygon_orig.buffer(0)
+                adjusted_coords = []
+                for px, py in coords:
+                    new_px = px - x
+                    new_py = py - y
+                    adjusted_coords.append((new_px, new_py))
+                adjusted_polygon = Polygon(adjusted_coords)
+                if not adjusted_polygon.is_valid:
+                    adjusted_polygon = adjusted_polygon.buffer(0)
+                # Clip adjusted polygon to crop boundary
+                crop_boundary = box(0, 0, w, h)
+                clipped_polygon = adjusted_polygon.intersection(crop_boundary)
+                if clipped_polygon.is_empty:
+                    continue  # Polygon is completely outside; exclude it
+                if not clipped_polygon.is_valid:
+                    clipped_polygon = clipped_polygon.buffer(0)
+                clipped_area = clipped_polygon.area
+                original_area_ann = polygon_orig.area
+                area_reduction_ann = calculate_area_reduction(original_area_ann, clipped_area)
+                # Check if area reduction exceeds max allowed
+                category_id = ann_orig.category_id
+                max_allowed_reduction_ann = max_clipped_area_per_category.get(category_id, 0.5)
+                if area_reduction_ann > max_allowed_reduction_ann:
+                    continue  # Exclude annotations that are too clipped
+
+                # Handle MultiPolygon cases
+                polygons_to_process = []
+                if isinstance(clipped_polygon, Polygon):
+                    polygons_to_process.append(clipped_polygon)
+                elif isinstance(clipped_polygon, MultiPolygon):
+                    polygons_to_process.extend(clipped_polygon.geoms)
+                else:
+                    continue
+
+                cleaned_polygon_coords = []
+                for poly in polygons_to_process:
+                    if self.task == 'detection':
+                        coords = ensure_axis_aligned_rectangle(list(poly.exterior.coords))
+                        if coords:
+                            cleaned_polygon_coords.extend(coords)
+                    else:
+                        coords = list(poly.exterior.coords)
+                        if coords:
+                            cleaned_polygon_coords.extend(coords)
+
+                if not cleaned_polygon_coords:
+                    continue
+
+                new_ann = UnifiedAnnotation(
+                    id=annotation_id_offset,
+                    image_id=image_id_offset,
+                    category_id=ann_orig.category_id,
+                    polygon=[coord for point in cleaned_polygon_coords for coord in point],
+                    iscrowd=ann_orig.iscrowd,
+                    area=clipped_area,
+                    is_polygon_clipped=area_reduction_ann > 0.0,
+                    area_reduction_due_to_clipping=area_reduction_ann,
+                )
+                annotation_id_offset += 1
+                new_annotations.append(new_ann)
+
+            if not new_annotations:
+                logging.info(f"No annotations left after cropping for image ID {img.id}. Skipping.")
+                continue
+
+            # Generate unique filename
+            filename, ext = os.path.splitext(os.path.basename(img.file_name))
+            new_filename = f"{filename}_crop_{uuid.uuid4().hex}{ext}"
+            output_image_path = os.path.join(self.config['output_images_dir'], new_filename)
+
+            # Save cropped image
+            save_success = save_image(cropped_image, output_image_path)
+            if not save_success:
+                logging.error(f"Failed to save cropped image '{output_image_path}'. Skipping this augmentation.")
+                continue
+
+            # Create new image entry
+            new_img = UnifiedImage(
+                id=image_id_offset,
+                file_name=output_image_path,
+                width=cropped_image.shape[1],
+                height=cropped_image.shape[0]
+            )
+            augmented_dataset.images.append(new_img)
+            augmented_dataset.annotations.extend(new_annotations)
+
+            # Visualization
+            if self.config['visualize_overlays'] and self.config['output_visualizations_dir']:
+                os.makedirs(self.config['output_visualizations_dir'], exist_ok=True)
+                visualization_filename = f"{os.path.splitext(new_filename)[0]}_viz.jpg"
+                mosaic_visualize_transformed_overlays(
+                    transformed_image=cropped_image.copy(),
+                    cleaned_annotations=new_annotations,
+                    output_visualizations_dir=self.config['output_visualizations_dir'],
+                    new_filename=visualization_filename,
+                    task=self.task
+                )
+
+            logging.info(f"Cropped image '{new_filename}' saved with annotations.")
+            image_id_offset += 1
+            image_successful_aug += 1
 
 
-    
-    
+
+
+    def apply_non_targeted(self, img, image, anns, img_w, img_h, image_id_offset, annotation_id_offset,
+                           augmented_dataset, max_clipped_area_per_category, existing_crops):
+        num_crops = self.config['num_crops_per_image']
+
+        crops = []
+
+        # Generate crops based on crop_modes
+        for crop_mode in self.config['crop_modes']:
+            params = self.config['crop_size_parameters'].get(crop_mode, {})
+            if crop_mode == 'fixed_size':
+                w = params.get('crop_width', 800)
+                h = params.get('crop_height', 800)
+                if w <= 0 or h <= 0:
+                    logging.warning(f"Invalid crop size for 'fixed_size': width={w}, height={h}. Skipping this mode.")
+                    continue
+                # Randomly position the fixed-size crop
+                if img_w > w:
+                    x = random.randint(0, img_w - w)
+                else:
+                    x = 0
+                if img_h > h:
+                    y = random.randint(0, img_h - h)
+                else:
+                    y = 0
+                crops.append((int(x), int(y), int(w), int(h)))
+            elif crop_mode == 'random_area':
+                min_area_ratio = params.get('min_area_ratio', 0.5)
+                max_area_ratio = params.get('max_area_ratio', 0.9)
+                if not (0 < min_area_ratio <= max_area_ratio < 1):
+                    logging.warning(f"Invalid area ratios for 'random_area': min={min_area_ratio}, max={max_area_ratio}. Skipping this mode.")
+                    continue
+                area_ratio = random.uniform(min_area_ratio, max_area_ratio)
+                crop_area = area_ratio * img_w * img_h
+                target_ratio = random.uniform(0.5, 2.0)
+                w = int(np.sqrt(crop_area * target_ratio))
+                h = int(np.sqrt(crop_area / target_ratio))
+                w = min(w, img_w)
+                h = min(h, img_h)
+                if img_w > w:
+                    x = random.randint(0, img_w - w)
+                else:
+                    x = 0
+                if img_h > h:
+                    y = random.randint(0, img_h - h)
+                else:
+                    y = 0
+                crops.append((int(x), int(y), int(w), int(h)))
+            else:
+                logging.warning(f"Unsupported crop mode '{crop_mode}' in non-targeted mode. Skipping.")
+                continue
+
+        if not crops:
+            logging.warning(f"No valid crops generated for image ID {img.id} in non-targeted mode. Skipping this image.")
+            return
+
+        # Shuffle crops to introduce randomness
+        random.shuffle(crops)
+
+        # Limit the number of crops
+        crops = crops[:num_crops]
+
+        image_successful_aug = 0
+
+        for crop_coords in crops:
+            x, y, w, h = crop_coords
+
+            # Check minimum crop size
+            min_crop_size = self.config.get('min_crop_size', 256)
+            if w < min_crop_size or h < min_crop_size:
+                logging.info(f"Crop size ({w}, {h}) is smaller than min_crop_size ({min_crop_size}). Skipping this crop.")
+                continue  # Skip this crop
+
+            # Check for overlap with existing crops
+            new_crop_bbox = [x, y, w, h]
+            overlap = False
+            for existing_crop in existing_crops:
+                existing_bbox = existing_crop
+                iou = calculate_iou(new_crop_bbox, existing_bbox)
+                if iou > self.config['overlap_parameters']['max_overlap']:
+                    overlap = True
+                    logging.info(f"New crop {new_crop_bbox} overlaps with existing crop {existing_bbox} (IoU={iou:.2f}) exceeding max_overlap={self.config['overlap_parameters']['max_overlap']}. Skipping this crop.")
+                    break
+            if overlap:
+                continue  # Skip this crop due to overlap
+
+            # Perform the cropping
+            success = self.perform_cropping(
+                img, image, anns, img_w, img_h, x, y, w, h,
+                image_id_offset, annotation_id_offset, augmented_dataset,
+                max_clipped_area_per_category, existing_crops
+            )
+            if success:
+                image_id_offset += 1
+                annotation_id_offset += len(anns)
+                image_successful_aug += 1
+
+    def perform_cropping(self, img, image, anns, img_w, img_h, x, y, w, h,
+                         image_id_offset, annotation_id_offset, augmented_dataset,
+                         max_clipped_area_per_category, existing_crops):
+
+        # Crop the image directly without padding
+        cropped_image = image[y:y + h, x:x + w]
+
+        # No scaling factors since we are not resizing
+        scale_x, scale_y = 1.0, 1.0
+        pad_left_total, pad_top_total = 0, 0  # No padding
+
+        # Process annotations for this image
+        discard_augmentation = False  # Flag to decide whether to discard augmentation
+
+        # List to hold cropped annotations temporarily
+        temp_cropped_annotations = []
+
+        for ann in anns:
+            # Original coordinates
+            coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
+            if not coords:
+                continue  # Skip if coordinates are invalid
+
+            original_polygon = Polygon(coords)
+            if not original_polygon.is_valid:
+                original_polygon = original_polygon.buffer(0)
+            original_area = original_polygon.area
+
+            # Adjust coordinates based on crop
+            adjusted_coords = []
+            for px, py in coords:
+                new_px = px - x + pad_left_total
+                new_py = py - y + pad_top_total
+                adjusted_coords.append((new_px, new_py))
+
+            adjusted_polygon = Polygon(adjusted_coords)
+            if not adjusted_polygon.is_valid:
+                adjusted_polygon = adjusted_polygon.buffer(0)
+            adjusted_area = adjusted_polygon.area
+
+            # Compute area reduction due to scaling (none in this case)
+            area_reduction_due_to_scaling = 0.0
+
+            # Define the crop boundary (image boundary)
+            crop_boundary = box(0, 0, cropped_image.shape[1], cropped_image.shape[0])
+
+            # Clip the adjusted polygon to the crop boundary
+            clipped_polygon = adjusted_polygon.intersection(crop_boundary)
+
+            if clipped_polygon.is_empty:
+                continue  # Polygon is completely outside; exclude it
+
+            if not clipped_polygon.is_valid:
+                clipped_polygon = clipped_polygon.buffer(0)
+            clipped_area = clipped_polygon.area
+
+            # Compute area reduction due to clipping
+            if adjusted_area > 0:
+                area_reduction_due_to_clipping = max(0.0, (adjusted_area - clipped_area) / adjusted_area)
+            else:
+                area_reduction_due_to_clipping = 0.0
+
+            # Total area reduction
+            if original_area > 0:
+                total_area_reduction = max(0.0, (original_area - clipped_area) / original_area)
+            else:
+                total_area_reduction = 0.0
+
+            # Check if area reduction exceeds the threshold
+            category_id = ann.category_id
+            max_allowed_reduction = max_clipped_area_per_category.get(category_id, 0.5)  # Default to 50%
+
+            if total_area_reduction > max_allowed_reduction:
+                discard_augmentation = True
+                logging.warning(f"Crop for image ID {img.id} discarded due to total area reduction ({total_area_reduction:.6f}) exceeding threshold ({max_allowed_reduction}) for category {category_id}.")
+                break  # Discard the entire augmentation
+
+            # Determine if polygon was clipped
+            is_polygon_clipped = area_reduction_due_to_clipping > 0.01
+
+            # Handle MultiPolygon cases
+            polygons_to_process = []
+            if isinstance(clipped_polygon, Polygon):
+                polygons_to_process.append(clipped_polygon)
+            elif isinstance(clipped_polygon, MultiPolygon):
+                polygons_to_process.extend(clipped_polygon.geoms)
+            else:
+                logging.warning(f"Unknown geometry type for clipped polygon: {type(clipped_polygon)}")
+                continue
+
+            # For detection task, we only need the bounding box of the polygon(s)
+            cleaned_polygon_coords = []
+            for poly in polygons_to_process:
+                if self.task == 'detection':
+                    coords = ensure_axis_aligned_rectangle(list(poly.exterior.coords))
+                    if coords:
+                        cleaned_polygon_coords.extend(coords)
+                else:
+                    coords = list(poly.exterior.coords)
+                    if coords:
+                        cleaned_polygon_coords.extend(coords)
+
+            if not cleaned_polygon_coords:
+                logging.debug(f"No valid coordinates found after processing clipped polygons. Skipping.")
+                continue
+
+            # Assign area reductions and flags
+            cleaned_ann = UnifiedAnnotation(
+                id=annotation_id_offset,
+                image_id=image_id_offset,
+                category_id=ann.category_id,
+                polygon=[coord for point in cleaned_polygon_coords for coord in point],
+                iscrowd=ann.iscrowd,
+                area=clipped_area,
+                is_polygon_scaled=False,  # No scaling occurred
+                is_polygon_clipped=is_polygon_clipped,
+                area_reduction_due_to_scaling=area_reduction_due_to_scaling,
+                area_reduction_due_to_clipping=area_reduction_due_to_clipping
+            )
+
+            temp_cropped_annotations.append(cleaned_ann)
+            annotation_id_offset += 1
+
+        if discard_augmentation:
+            logging.info(f"Cropping augmentation for image ID {img.id} discarded due to high area reduction.")
+            return False  # Skip this augmentation
+
+        # If no polygons remain after excluding those completely outside, skip augmentation
+        if not temp_cropped_annotations:
+            logging.info(f"Cropping augmentation results in all polygons being completely outside. Skipping augmentation.")
+            return False
+
+        # Generate unique filename using UUID to prevent collisions
+        filename, ext = os.path.splitext(os.path.basename(img.file_name))
+        new_filename = f"{filename}_crop_{uuid.uuid4().hex}{ext}"
+        output_image_path = os.path.join(self.config['output_images_dir'], new_filename)
+
+        # Save cropped image
+        save_success = save_image(cropped_image, output_image_path)
+        if not save_success:
+            logging.error(f"Failed to save cropped image '{output_image_path}'. Skipping this augmentation.")
+            return False
+
+        # Add the new crop's bounding box to existing_crops for overlap control
+        existing_crops.append([x, y, w, h])
+
+        # Create new image entry
+        new_img = UnifiedImage(
+            id=image_id_offset,
+            file_name=output_image_path,
+            width=cropped_image.shape[1],
+            height=cropped_image.shape[0]
+        )
+        augmented_dataset.images.append(new_img)
+
+        # Process and save cropped annotations
+        for cropped_ann in temp_cropped_annotations:
+            augmented_dataset.annotations.append(cropped_ann)
+            logging.info(f"Added annotation ID {cropped_ann.id} for image ID {image_id_offset}.")
+
+        # Visualization
+        if self.config['visualize_overlays'] and self.config['output_visualizations_dir']:
+            os.makedirs(self.config['output_visualizations_dir'], exist_ok=True)
+            visualization_filename = f"{os.path.splitext(new_filename)[0]}_viz.jpg"
+            mosaic_visualize_transformed_overlays(
+                transformed_image=cropped_image.copy(),
+                cleaned_annotations=temp_cropped_annotations,
+                output_visualizations_dir=self.config['output_visualizations_dir'],
+                new_filename=visualization_filename,
+                task=self.task  # Pass the task ('detection' or 'segmentation')
+            )
+
+        logging.info(f"Cropped image '{new_filename}' saved with {len(temp_cropped_annotations)} annotations.")
+        return True

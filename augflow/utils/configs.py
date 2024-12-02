@@ -25,75 +25,81 @@ affine_default_config = {
     'output_images_dir': 'raw_images/augmented_images_affine',
 }
 
+# augflow/utils/configs.py
+
 crop_default_config = {
-    'desired_output_size': None,  # (width, height) or None
-    'crop_modes': ['fixed_size', 'random_area', 'random_aspect', 'grid', 'sliding_window', 'predefined'],
+    'modes': ['targeted'],  # Default to targeted mode
+    'focus_categories': [],  # Empty by default
+    'num_crops_per_image': 3,
+    'margin': 50,  # Margin around focus polygons
+    'min_crop_size': 256,
+    'desired_output_size': None,  # Can be set to (width, height)
+    'clipping_parameters': {
+        'clipping_mode': 'constant',  # Options: 'constant', 'reflect', 'edge'
+        'padding_color': (0, 0, 0),  # Default padding color (black)
+    },
+    'crop_modes': ['fixed_size', 'random_area'],  # Modes for non-targeted cropping
     'crop_size_parameters': {
         'fixed_size': {
             'crop_width': 800,
-            'crop_height': 800
+            'crop_height': 800,
         },
         'random_area': {
             'min_area_ratio': 0.5,
-            'max_area_ratio': 0.9
+            'max_area_ratio': 0.9,
         },
-        'random_aspect': {
-            'min_aspect_ratio': 0.75,
-            'max_aspect_ratio': 1.33
-        },
-        'sliding_window': {
-            'window_size': (400, 400),
-            'step_size': (200, 200)
-        },
-        'grid': {
-            'grid_rows': 2,
-            'grid_cols': 2
-        }
     },
-    'num_crops_per_image': 3,
-    'predefined_crops': None,  # {image_id: [(x, y, w, h), ...]}
-    'clipping_parameters': {
-        'clipping_mode': 'pad',  # 'pad', 'resize_crop', 'ignore'
-        'padding_color': (0, 0, 0)  # BGR
-    },
-    'max_clipped_area_per_category': {},  # {category_id: max_allowed_reduction}
     'aspect_ratio_parameters': {
-        'preserve_aspect_ratio': True,
-        'target_aspect_ratio': (1, 1)  # Tuple (width, height)
+        'preserve_aspect_ratio': False,
+        'target_aspect_ratio': (1, 1),
     },
     'overlap_parameters': {
-        'max_overlap': 0.3
+        'max_overlap': 0.5,  # Maximum allowed overlap between crops
     },
+    'max_clipped_area_per_category': None,  # Will be set to default in code if not provided
     'random_seed': 42,
     'enable_cropping': True,
     'visualize_overlays': True,
-    'output_visualizations_dir': 'visualize/visualize_crop',
-    'output_images_dir': 'raw_images/augmented_images_crop',
-    'systematic_crops': False,
-    'systematic_crops_parameters': {
-        'mode': 'largest',  # 'largest' or 'categories'
-        'categories': [],    # List of category IDs to focus on if mode is 'categories'
-        'margin': 100         # Margin in pixels around the polygon
-    },
-    'min_crop_size': 256  # Minimum allowed dimension (width or height) for a crop
+    'output_visualizations_dir': 'visualize/visualize_cropping',
+    'output_images_dir': 'raw_images/augmented_images_cropping',
 }
+
 
 
 cutout_default_config = {
+    'modes': ['non_targeted'],  # Default to non-targeted mode
+    'focus_categories': [],  # No focus categories by default
     'cutout_probability': 1.0,
-    'cutout_size': (300, 300),     # (height, width)
-    'num_cutouts': 1,              # Number of cutout regions per augmentation
-    'cutout_p': 1.0,               # Probability to apply each cutout
-    'output_images_dir': 'raw_images/augmented_images_cutout',
-    'visualize_overlays': True,
-    'output_visualizations_dir': 'visualize/visualize_cutout',
-    'max_clipped_area_per_category': None,  # {category_id: max_allowed_reduction}
+    'num_augmented_images': 5,
+    'num_cutouts_per_image': 1,
+    'cutout_size_percent': ((0.1, 0.2), (0.1, 0.2)),  # (height_percent_range, width_percent_range)
+    'margin_percent': 0.05,
+    'max_shift_percent': 1,
+    'shift_steps': 20,
+    'max_clipped_area_per_category': None,  # Will be set to default in code
     'random_seed': 42,
     'enable_cutout': True,
-    'systematic_cutout': False,
-    'systematic_cutout_mode': 'largest',  # 'largest' or 'smallest'
-    'margin_pixels': 50,  # Margin in pixels around the polygon
+    'visualize_overlays': True,
+    'output_visualizations_dir': 'visualize/visualize_cutout',
+    'output_images_dir': 'raw_images/augmented_images_cutout',
 }
+
+
+# cutout_default_config = {
+#     'cutout_probability': 1.0,
+#     'cutout_size': (300, 300),     # (height, width)
+#     'num_cutouts': 1,              # Number of cutout regions per augmentation
+#     'cutout_p': 1.0,               # Probability to apply each cutout
+#     'output_images_dir': 'raw_images/augmented_images_cutout',
+#     'visualize_overlays': True,
+#     'output_visualizations_dir': 'visualize/visualize_cutout',
+#     'max_clipped_area_per_category': None,  # {category_id: max_allowed_reduction}
+#     'random_seed': 42,
+#     'enable_cutout': True,
+#     'systematic_cutout': False,
+#     'systematic_cutout_mode': 'largest',  # 'largest' or 'smallest'
+#     'margin_pixels': 50,  # Margin in pixels around the polygon
+# }
 
 flip_default_config = {
     'flip_modes': ['both'],  # Options: 'horizontal', 'vertical', 'both'
@@ -129,22 +135,29 @@ mosaic_default_config = {
 }
 
 
+# rotate_default_config
+
+# configs.py
+
 rotate_default_config = {
-    'rotation_probability': 0.8,
-    'rotation_point_modes': ['center','random'],  # 'center', 'random'
-    'rotation_angle_modes': ['random_range'],  # 'predefined_set', 'random_range'
+    'modes': ['non_targeted'],  # Default to non-targeted mode
+    'focus_categories': [],  # Empty by default
+    'rotation_probability': 1.0,
+    'rotation_point_modes': ['center'],  # Default rotation point
+    'rotation_angle_modes': ['predefined_set'],
     'angle_parameters': {
-        'random_range': (-30, 30),  # Min and max angles
-        'predefined_set': [90, 180, 270]  # Specific angles
+        'predefined_set': [-45, 45],
+        'alpha': 45
     },
-    'num_rotations_per_image': 5,
-    'max_clipped_area_per_category': None,  # {category_id: max_allowed_reduction}
+    'num_rotations_per_image': 3,
+    'max_clipped_area_per_category': None,  # Will be set to default in code if not provided
     'random_seed': 42,
     'enable_rotation': True,
     'visualize_overlays': True,
-    'output_visualizations_dir': 'visualize/visualize_rotate',
-    'output_images_dir': 'raw_images/augmented_images_rotate',
+    'output_visualizations_dir': 'visualize/visualize_rotation',
+    'output_images_dir': 'raw_images/augmented_images_rotation',
 }
+
 
 
 scale_default_config = {
@@ -181,17 +194,19 @@ shear_default_config = {
 
 
 translate_default_config = {
-    'translate_probability': 1,
-    'min_translate_x': -0.35,  # -35% of image width
-    'max_translate_x': 0.35,   # +35% of image width
-    'min_translate_y': -0.35,  # -35% of image height
-    'max_translate_y': 0.35,   # +35% of image height
+    'modes': ['non_targeted'],  # Default to non-targeted mode
+    'focus_categories': [],  # Empty by default
+    'translate_probability': 1.0,
+    'min_translate_x': -0.2,  # Minimum translation in x direction as a fraction of image width
+    'max_translate_x': 0.2,   # Maximum translation in x direction as a fraction of image width
+    'min_translate_y': -0.2,  # Minimum translation in y direction as a fraction of image height
+    'max_translate_y': 0.2,   # Maximum translation in y direction as a fraction of image height
     'num_translations_per_image': 1,
-    'max_clipped_area_per_category': None,  # {category_id: max_allowed_reduction}
+    'max_clipped_area_per_category': None,  # Will be set to default in code if not provided
     'random_seed': 42,
     'enable_translation': True,
     'visualize_overlays': True,
-    'output_visualizations_dir': 'visualize/visualize_translate',
-    'output_images_dir': 'raw_images/augmented_images_translate',
+    'output_visualizations_dir': 'visualize/visualize_translation',
+    'output_images_dir': 'raw_images/augmented_images_translation',
 }
 

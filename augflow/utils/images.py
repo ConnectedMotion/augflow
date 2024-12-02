@@ -3,9 +3,28 @@ import numpy as np
 import logging
 import os
 from shapely.geometry import Polygon
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from .unified_format import UnifiedAnnotation
 from .annotations import reshape_segmentation
+
+
+# augflow/utils/images.py
+
+def crop_image_direct(image: np.ndarray, crop_coords: Tuple[int, int, int, int]) -> np.ndarray:
+    """
+    Crop the image directly using the provided crop coordinates.
+
+    Args:
+        image (np.ndarray): The original image.
+        crop_coords (Tuple[int, int, int, int]): The crop coordinates (x, y, w, h).
+
+    Returns:
+        np.ndarray: The cropped image.
+    """
+    x, y, w, h = crop_coords
+    cropped_image = image[y:y + h, x:x + w]
+    return cropped_image
+
 
 def load_image(image_path: str) -> Optional[np.ndarray]:
     """
