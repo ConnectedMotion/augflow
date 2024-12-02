@@ -27,41 +27,23 @@ affine_default_config = {
 
 # augflow/utils/configs.py
 
+
 crop_default_config = {
-    'modes': ['targeted'],  # Default to targeted mode
-    'focus_categories': [],  # Empty by default
-    'num_crops_per_image': 3,
-    'margin': 50,  # Margin around focus polygons
-    'min_crop_size': 256,
-    'desired_output_size': None,  # Can be set to (width, height)
-    'clipping_parameters': {
-        'clipping_mode': 'constant',  # Options: 'constant', 'reflect', 'edge'
-        'padding_color': (0, 0, 0),  # Default padding color (black)
-    },
-    'crop_modes': ['fixed_size', 'random_area'],  # Modes for non-targeted cropping
-    'crop_size_parameters': {
-        'fixed_size': {
-            'crop_width': 800,
-            'crop_height': 800,
-        },
-        'random_area': {
-            'min_area_ratio': 0.5,
-            'max_area_ratio': 0.9,
-        },
-    },
-    'aspect_ratio_parameters': {
-        'preserve_aspect_ratio': False,
-        'target_aspect_ratio': (1, 1),
-    },
-    'overlap_parameters': {
-        'max_overlap': 0.5,  # Maximum allowed overlap between crops
-    },
-    'max_clipped_area_per_category': None,  # Will be set to default in code if not provided
+    'modes': ['non_targeted'],  # Default to non-targeted mode
+    'focus_categories': [],  # No focus categories by default
+    'crop_probability': 1.0,
+    'num_crops_per_image': 5,
+    'crop_size_percent': ((0.1, 0.5), (0.1, 0.5)),  # (width_percent_range, height_percent_range)
+    'margin_percent': 0.05,
+    'max_shift_percent': 1.0,
+    'shift_steps': 20,
+    'max_clipped_area_per_category': None,  # Will be set to default in code
     'random_seed': 42,
     'enable_cropping': True,
     'visualize_overlays': True,
-    'output_visualizations_dir': 'visualize/visualize_cropping',
-    'output_images_dir': 'raw_images/augmented_images_cropping',
+    'output_visualizations_dir': 'visualize/visualize_crop',
+    'output_images_dir': 'raw_images/augmented_images_crop',
+    'padding_color': (0, 0, 0),  # Black padding
 }
 
 

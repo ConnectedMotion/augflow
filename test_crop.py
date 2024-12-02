@@ -1,5 +1,3 @@
-# pipeline_code_crop.py
-
 import os
 import logging
 from augflow.pipeline import Pipeline
@@ -21,16 +19,16 @@ pipe = Pipeline()
 # Configure the pipeline task for YOLO format, specifying the dataset path containing images and labels
 pipe.task(
     format='yolo',
-    dataset_path='/home/omar/Videos/test_datasets/seg.yolov8/train/'
+    dataset_path='/home/omar/Videos/seg.yolov8/train'
 )
 
 # Custom Crop Configuration
 custom_crop_config = {
     'modes': ['targeted'],  # Applying targeted mode
     'focus_categories': ['3_dent', '6_scratch'],  # Custom focus categories
-    'num_crops_per_image': 3,
-    'margin': 50,
-    'min_crop_size': 256,
+    'num_crops_per_image': 20,
+    'margin_percent': 0.05,  # Adjusted from 'margin' to 'margin_percent'
+    'crop_size_percent': ((0.4, 1.0), (0.4, 1.0)),  # Adjusted to ensure minimum crop size
     'max_clipped_area_per_category': None,  # Defaults will be used
     'random_seed': 42,
     'enable_cropping': True,
@@ -41,6 +39,7 @@ custom_crop_config = {
 
 pipe.fuse(
     source_id='root',
+    min_relative_area=0.05,
     type='crop',
     id='aug_crop',
     config=custom_crop_config,
@@ -54,3 +53,5 @@ pipe.out(
     ignore_masks=False,
     visualize_annotations=True
 )
+
+
