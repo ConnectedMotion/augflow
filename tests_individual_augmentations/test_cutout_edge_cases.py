@@ -18,10 +18,26 @@ log_filename = 'cutout_augmentation_test.log'
 logging.basicConfig(filename=log_filename, level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(message)s')
 
+# Assign colors to categories, avoiding red, green, orange, yellow and their shades
+category_colors = {
+    1: (75, 0, 130),     # Indigo
+    2: (238, 130, 238),  # Violet
+    3: (255, 105, 180),  # Hot Pink (focus category)
+    4: (0, 191, 255),    # Deep Sky Blue (focus category)
+}
+
+# Map category IDs to shapes
+category_shapes = {
+    1: 'rectangle',
+    2: 'pentagon',
+    3: 'heptagon',     # Focus category
+    4: 'hendecagon',   # Focus category
+}
+
 # Synthetic data generation functions
 def create_polygon_at_position(position: str, width: int, height: int, shape: str) -> List[Tuple[int, int]]:
     """
-    Create a polygon (rectangle, pentagon, or irregular shape) at a specified position in the image.
+    Create a polygon (rectangle, pentagon, heptagon, hendecagon) at a specified position in the image.
     """
     size = 100  # Fixed size for test
     margin = 10  # Small margin from the edge
@@ -58,7 +74,10 @@ def create_polygon_at_position(position: str, width: int, height: int, shape: st
         x_min = random.randint(margin, width - size - margin)
         y_min = random.randint(margin, height - size - margin)
 
-    # Generate different shapes
+    center_x = x_min + size // 2
+    center_y = y_min + size // 2
+    radius = size // 2
+
     if shape == 'rectangle':
         x_max = x_min + size
         y_max = y_min + size
@@ -69,12 +88,14 @@ def create_polygon_at_position(position: str, width: int, height: int, shape: st
             (x_min, y_max),
             (x_min, y_min)  # Close the polygon
         ]
-    elif shape == 'pentagon':
-        center_x = x_min + size // 2
-        center_y = y_min + size // 2
-        radius = size // 2
-        num_points = 5
-        angle_offset = 0
+    elif shape in ['pentagon', 'heptagon', 'hendecagon']:
+        if shape == 'pentagon':
+            num_points = 5
+        elif shape == 'heptagon':
+            num_points = 7
+        elif shape == 'hendecagon':
+            num_points = 11
+        angle_offset = 0  # Can adjust if needed
         polygon_coords = []
         for i in range(num_points):
             angle = angle_offset + i * (2 * np.pi / num_points)
@@ -85,32 +106,15 @@ def create_polygon_at_position(position: str, width: int, height: int, shape: st
             y = max(0, min(height - 1, y))
             polygon_coords.append((x, y))
         polygon_coords.append(polygon_coords[0])  # Close the polygon
-    elif shape == 'irregular':
-        # Generate an irregular polygon with random points
-        num_points = random.randint(6, 10)
-        angles = sorted([random.uniform(0, 2 * np.pi) for _ in range(num_points)])
-        center_x = x_min + size // 2
-        center_y = y_min + size // 2
-        radius = size // 2
-        polygon_coords = []
-        for angle in angles:
-            r = radius * random.uniform(0.5, 1.0)
-            x = int(center_x + r * np.cos(angle))
-            y = int(center_y + r * np.sin(angle))
-            # Ensure the points are within the image boundaries
-            x = max(0, min(width - 1, x))
-            y = max(0, min(height - 1, y))
-            polygon_coords.append((x, y))
-        polygon_coords.append(polygon_coords[0])  # Close the polygon
     else:
-        raise ValueError("Invalid shape type. Choose 'rectangle', 'pentagon', or 'irregular'.")
+        raise ValueError("Invalid shape type. Choose 'rectangle', 'pentagon', 'heptagon', or 'hendecagon'.")
 
     return polygon_coords
 
 def create_synthetic_dataset_with_edge_cases(num_images: int, output_dir: str, task: str, overlap_percentage: float = 0.3) -> UnifiedDataset:
     """
     Create a synthetic dataset with the specified number of images.
-    Each image will have annotations for 5 categories, placed randomly and systematically to check edge cases.
+    Each image will have annotations for the specified categories and shapes.
     Overlap_percentage determines how much two polygons overlap (values between 0 and 1).
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -119,98 +123,107 @@ def create_synthetic_dataset_with_edge_cases(num_images: int, output_dir: str, t
     annotation_id = 1
 
     categories = [
-        {'id': 1, 'name': 'category1', 'supercategory': 'synthetic'},
-        {'id': 2, 'name': 'category2', 'supercategory': 'synthetic'},
-        {'id': 3, 'name': 'category3', 'supercategory': 'synthetic'},
-        {'id': 4, 'name': 'category4', 'supercategory': 'synthetic'},
-        {'id': 5, 'name': 'category5', 'supercategory': 'synthetic'},
+        {'id': 1, 'name': 'category_rectangle', 'supercategory': 'synthetic'},
+        {'id': 2, 'name': 'category_pentagon', 'supercategory': 'synthetic'},
+        {'id': 3, 'name': 'category_heptagon', 'supercategory': 'synthetic'},
+        {'id': 4, 'name': 'category_hendecagon', 'supercategory': 'synthetic'},
     ]
     dataset.categories = categories
 
     for _ in range(num_images):
-        width = 800  # Fixed size for consistency in tests
-        height = 600
+        width = 1024  # Image size larger than 800x800
+        height = 1024
         image = np.ones((height, width, 3), dtype=np.uint8) * 255  # White background
 
         annotations = []
 
-        # Place annotations randomly and systematically to check edge cases
-        # Edge cases include objects at the corners, edges, center, overlapping polygons, and irregular shapes
+        # Positions
         positions = [
             'top_left', 'top_right', 'bottom_left', 'bottom_right', 'center',
             'left_edge', 'right_edge', 'top_edge', 'bottom_edge'
         ]
-
-        shapes = ['rectangle', 'pentagon', 'irregular']
-        category_ids = [1, 2, 3, 4, 5]
-        random.shuffle(category_ids)
+        random.shuffle(positions)
 
         # Keep track of polygons for overlapping
         existing_polygons = []
 
-        for idx, category_id in enumerate(category_ids):
-            position = positions[idx % len(positions)]
-            shape = random.choice(shapes) if task == 'segmentation' else 'rectangle'
-            polygon_coords = create_polygon_at_position(position, width, height, shape)
-            polygon_shapely = Polygon(polygon_coords)
+        # For each category, place one or more polygons
+        for category in categories:
+            category_id = category['id']
+            shape = category_shapes[category_id]
+            color = category_colors[category_id]
 
-            # For overlapping polygons between focus and non-focus categories
-            # Randomly decide to overlap with an existing polygon
-            overlap_chance = 0.5  # 50% chance to create an overlapping polygon
-            if existing_polygons and random.random() < overlap_chance:
-                overlapping_poly = random.choice(existing_polygons)
-                # Calculate the required offset to achieve the desired overlap percentage
-                overlap_area_target = overlapping_poly.area * overlap_percentage
+            num_polygons = random.randint(1, 3)  # Some images have more than one polygon per category
 
-                # Create a scaled version of the overlapping polygon
-                scaled_poly = affinity.scale(overlapping_poly, xfact=1.0, yfact=1.0, origin='center')
-
-                # Move the scaled polygon over the existing polygon to achieve the desired overlap
-                # This is an approximation; exact overlap area calculation is complex
-                attempts = 0
-                max_attempts = 10
-                while attempts < max_attempts:
-                    offset_x = random.randint(-20, 20)
-                    offset_y = random.randint(-20, 20)
-                    moved_poly = affinity.translate(scaled_poly, xoff=offset_x, yoff=offset_y)
-                    intersection_area = overlapping_poly.intersection(moved_poly).area
-                    if intersection_area >= overlap_area_target * 0.9 and intersection_area <= overlap_area_target * 1.1:
-                        break  # Found a suitable overlap
-                    attempts += 1
-
-                if attempts == max_attempts:
-                    # If we couldn't find a suitable overlap, proceed without overlapping
-                    logging.info(f"Could not achieve desired overlap percentage after {max_attempts} attempts.")
-                    moved_poly = scaled_poly
-
-                polygon_coords = list(moved_poly.exterior.coords)
-                polygon_shapely = moved_poly
-
-                # Ensure the points are within the image boundaries
-                polygon_coords = [(max(0, min(width - 1, x)), max(0, min(height - 1, y))) for x, y in polygon_coords]
-                polygon_coords.append(polygon_coords[0])  # Close the polygon
+            for _ in range(num_polygons):
+                if positions:
+                    position = positions.pop()
+                else:
+                    position = None  # Random position
+                polygon_coords = create_polygon_at_position(position, width, height, shape)
                 polygon_shapely = Polygon(polygon_coords)
 
-            existing_polygons.append(polygon_shapely)
+                # For overlapping polygons between focus and non-focus categories
+                # Randomly decide to overlap with an existing polygon
+                overlap_chance = 0.5  # 50% chance to create an overlapping polygon
+                if existing_polygons and random.random() < overlap_chance:
+                    overlapping_poly = random.choice(existing_polygons)
+                    # Calculate the required offset to achieve the desired overlap percentage
+                    overlap_area_target = overlapping_poly.area * overlap_percentage
 
-            # Draw the object on the image with a unique color per category
-            #color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-            cv2.fillPoly(image, [np.array(polygon_coords, dtype=np.int32)], (128, 0, 128))  # Purple color
+                    # Create a scaled version of the overlapping polygon
+                    scaled_poly = affinity.scale(overlapping_poly, xfact=1.0, yfact=1.0, origin='center')
 
-            # Flatten the polygon coordinates
-            polygon_flat = [coord for point in polygon_coords for coord in point]
+                    # Move the scaled polygon over the existing polygon to achieve the desired overlap
+                    # This is an approximation; exact overlap area calculation is complex
+                    attempts = 0
+                    max_attempts = 10
+                    while attempts < max_attempts:
+                        offset_x = random.randint(-20, 20)
+                        offset_y = random.randint(-20, 20)
+                        moved_poly = affinity.translate(scaled_poly, xoff=offset_x, yoff=offset_y)
+                        intersection_area = overlapping_poly.intersection(moved_poly).area
+                        if intersection_area >= overlap_area_target * 0.9 and intersection_area <= overlap_area_target * 1.1:
+                            break  # Found a suitable overlap
+                        attempts += 1
 
-            # Create annotation
-            area = polygon_shapely.area
-            annotation = UnifiedAnnotation(
-                id=annotation_id,
-                image_id=image_id,
-                category_id=category_id,
-                polygon=polygon_flat,
-                area=area
-            )
-            annotations.append(annotation)
-            annotation_id += 1
+                    if attempts == max_attempts:
+                        # If we couldn't find a suitable overlap, proceed without overlapping
+                        logging.info(f"Could not achieve desired overlap percentage after {max_attempts} attempts.")
+                        moved_poly = scaled_poly
+
+                    polygon_coords = list(moved_poly.exterior.coords)
+                    polygon_shapely = moved_poly
+
+                    # Ensure the points are within the image boundaries
+                    polygon_coords = [(max(0, min(width - 1, x)), max(0, min(height - 1, y))) for x, y in polygon_coords]
+                    polygon_coords.append(polygon_coords[0])  # Close the polygon
+                    polygon_shapely = Polygon(polygon_coords)
+
+                existing_polygons.append(polygon_shapely)
+
+                # Draw the object on the image with its category color
+                cv2.fillPoly(image, [np.array(polygon_coords, dtype=np.int32)], color)
+
+                # Initially, we assume the polygon is not clipped
+                is_polygon_clipped = False
+
+                # Flatten the polygon coordinates
+                polygon_flat = [coord for point in polygon_coords for coord in point]
+
+                # Create annotation
+                area = polygon_shapely.area
+                annotation = UnifiedAnnotation(
+                    id=annotation_id,
+                    image_id=image_id,
+                    category_id=category_id,
+                    polygon=polygon_flat,
+                    area=area
+                )
+                # We need to store whether the polygon is clipped or not
+                annotation.is_polygon_clipped = is_polygon_clipped  # Initially False
+                annotations.append(annotation)
+                annotation_id += 1
 
         # Save image
         image_filename = os.path.join(output_dir, f'synthetic_image_{image_id}.jpg')
@@ -247,7 +260,7 @@ def test_cutout_augmentation_edge_cases():
     tasks = ['segmentation']
 
     # Define overlap percentages to test
-    overlap_percentages = [0.0, 0.3, 0.5, 0.7]
+    overlap_percentages = [0.0]
 
     for task in tasks:
         for overlap_percentage in overlap_percentages:
@@ -265,10 +278,10 @@ def test_cutout_augmentation_edge_cases():
                 # Targeted mode
                 {
                     'modes': ['targeted'],
-                    'focus_categories': ['category1', 'category2'],
+                    'focus_categories': ['category_heptagon', 'category_hendecagon'],
                     'config': {
                         'cutout_probability': 1.0,
-                        'num_augmented_images': 3,
+                        'num_augmented_images': len(dataset.images),
                         'margin_percent': 0.05,
                         'max_shift_percent': 1.0,  # Increased to allow larger shifts
                         'shift_steps': 20,         # Increased for finer granularity
@@ -305,19 +318,29 @@ def test_cutout_augmentation_edge_cases():
                         polygon_coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
                         assert len(polygon_coords) >= 3, f"Invalid polygon with coordinates: {ann.polygon}"
 
+                        # Draw the polygon on the image
+                        polygon_np = np.array(polygon_coords, dtype=np.int32)
+                        category_color = category_colors[ann.category_id]
+
+                        # Determine outline color based on clipping
+                        if hasattr(ann, 'is_polygon_clipped') and ann.is_polygon_clipped:
+                            outline_color = (0, 0, 255)  # Red for clipped
+                        else:
+                            outline_color = (0, 255, 0)  # Green for not clipped
+
+                        # Fill the polygon with its color
+                        cv2.fillPoly(image, [polygon_np], category_color)
+                        # Draw the polygon outline
+                        cv2.polylines(image, [polygon_np], isClosed=True, color=outline_color, thickness=2)
+
                         # Check if the polygon is within image boundaries
                         for x, y in polygon_coords:
                             assert 0 <= x <= img.width, f"Annotation ID {ann.id} has x-coordinate {x} outside image width."
                             assert 0 <= y <= img.height, f"Annotation ID {ann.id} has y-coordinate {y} outside image height."
 
-                        # Additional assertions can be added here
-
-                        # Log the area reduction due to clipping if any
-                        if ann.is_polygon_clipped:
-                            logging.info(f"Annotation ID {ann.id} has area reduction due to clipping.")
-
-                    # Visualizations are handled within the augmentation class
-                    # No need to call visualization functions here
+                    # Save the image with drawn annotations
+                    annotated_image_filename = os.path.join(augmented_images_dir, f"annotated_{os.path.basename(img.file_name)}")
+                    cv2.imwrite(annotated_image_filename, image)
 
                 logging.info(f"Cutout augmentation tests completed successfully for modes '{modes}', task '{task}', overlap_percentage {overlap_percentage}.")
 

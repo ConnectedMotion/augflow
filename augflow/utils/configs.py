@@ -25,7 +25,6 @@ affine_default_config = {
     'output_images_dir': 'raw_images/augmented_images_affine',
 }
 
-# augflow/utils/configs.py
 
 
 crop_default_config = {
@@ -33,27 +32,34 @@ crop_default_config = {
     'focus_categories': [],  # No focus categories by default
     'crop_probability': 1.0,
     'num_crops_per_image': 5,
-    'crop_size_percent': ((0.1, 0.5), (0.1, 0.5)),  # (width_percent_range, height_percent_range)
+    'crop_size_percent': (
+        (0.1, 0.5),
+        (0.1, 0.5),
+    ),  # (width_percent_range, height_percent_range)
     'margin_percent': 0.05,
     'max_shift_percent': 1.0,
     'shift_steps': 20,
-    'max_clipped_area_per_category': None,  # Will be set to default in code
+    'max_clipped_area_per_category': None,  # Will be set to default
     'random_seed': 42,
     'enable_cropping': True,
     'visualize_overlays': True,
     'output_visualizations_dir': 'visualize/visualize_crop',
     'output_images_dir': 'raw_images/augmented_images_crop',
     'padding_color': (0, 0, 0),  # Black padding
+    'crop_iou_threshold': 0.5,  # Threshold for crop similarity
 }
 
 
 
+
+
+# configs.py
 cutout_default_config = {
-    'modes': ['non_targeted'],  # Default to non-targeted mode
+    'modes': ['targeted'],  # Default to targeted mode
     'focus_categories': [],  # No focus categories by default
     'cutout_probability': 1.0,
     'num_augmented_images': 5,
-    'num_cutouts_per_image': 1,
+    'num_cutouts_per_image': 1,  # Since we have one cutout per polygon
     'cutout_size_percent': ((0.1, 0.2), (0.1, 0.2)),  # (height_percent_range, width_percent_range)
     'margin_percent': 0.05,
     'max_shift_percent': 1,
@@ -64,8 +70,9 @@ cutout_default_config = {
     'visualize_overlays': True,
     'output_visualizations_dir': 'visualize/visualize_cutout',
     'output_images_dir': 'raw_images/augmented_images_cutout',
+    'allowed_shifts': ['up', 'down', 'left', 'right'],
+    'area_reduction_threshold': 0.1,  # 10%
 }
-
 
 # cutout_default_config = {
 #     'cutout_probability': 1.0,

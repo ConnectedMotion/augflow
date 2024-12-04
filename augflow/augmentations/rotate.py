@@ -71,7 +71,7 @@ class RotateAugmentation(Augmentation):
         # Define max_clipped_area_per_category if not provided
         if not self.max_clipped_area_per_category:
             # Assign a default value if not specified, e.g., 0.2 (20%) for all categories
-            self.max_clipped_area_per_category = {cat['id']: 0.5 for cat in dataset.categories}
+            self.max_clipped_area_per_category = {cat['id']: 0.75 for cat in dataset.categories}
 
         max_clipped_area_per_category = self.max_clipped_area_per_category
 

@@ -21,13 +21,13 @@ pipe = Pipeline()
 # Configure the pipeline task for YOLO format, specifying the dataset path containing images and labels
 pipe.task(
     format='yolo',
-    dataset_path='/home/omar/Videos/test_datasets/seg.yolov8/train/'
+    dataset_path='/home/omar/Downloads/coco128-seg/train/'
 )
 
 # Custom Rotate Configuration
 custom_rotate_config = {
     'modes': ['targeted'],  # Applying targeted mode only
-    'focus_categories': ['3_dent', '6_scratch'],  # Custom focus categories
+    'focus_categories': ['person', 'bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light'],
     'rotation_probability': 1.0,
     'rotation_point_modes': ['center', 'random'],
     'rotation_angle_modes': ['predefined_set'],

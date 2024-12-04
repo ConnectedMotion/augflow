@@ -21,13 +21,13 @@ pipe = Pipeline()
 # Configure the pipeline task for YOLO format, specifying the dataset path containing images and labels
 pipe.task(
     format='yolo',
-    dataset_path='/home/omar/Videos/test_datasets/seg.yolov8/train/'
+    dataset_path='/home/omar/Downloads/coco128-seg/train/'
 )
 
 # Custom Translate Configuration
 custom_translate_config = {
     'modes': ['targeted'],  # Applying targeted mode only
-    'focus_categories': ['3_dent', '6_scratch'],  # Custom focus categories
+    'focus_categories': ['person', 'bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light'],
     'translate_probability': 1.0,
     'min_translate_x': -0.3,
     'max_translate_x': 0.3,
