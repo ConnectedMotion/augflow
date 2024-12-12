@@ -7,7 +7,7 @@ README = (HERE / "README.md").read_text()
 
 setup(
     name='augflow',
-    version='1.0.1',
+    version='1.1.0',
     author='Omar Alnasier',
     author_email='omar@connectedmotion.io',
     description='A versatile augmentation library for computer vision projects.',

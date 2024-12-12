@@ -150,7 +150,7 @@ After creating your virtual env you can **Install AugFlow** using one of the fol
         pip install -e .
         ```
 
-2. **Or. Install directly using &nbsp; [<img align="center" src="https://img.shields.io/badge/Pip-3776AB.svg?style={badge_style}&logo=pypi&logoColor=white" />](https://pypi.org/project/pip/)**
+2. **Or. Install directly using &nbsp; [<img align="center" src="https://img.shields.io/badge/Pip-3776AB.svg?style={badge_style}&logo=pypi&logoColor=white" />](https://pypi.org/project/augflow/)**
 
  ```bash
     pip install augflow
