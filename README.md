@@ -162,73 +162,43 @@ The following example demonstrates how to use AugFlow's Pipeline to apply a tree
 
   ```bash
     
-import copy
 
+
+import os
+import logging
 from augflow.pipeline import Pipeline
 import augflow.utils.configs as config
+from augflow.utils.configs import example_custom_rotate_config
 
-# Define the experiment identifier
-experiment_id = 'your_experiment_id'
+logging.basicConfig(level=logging.INFO)
 
-# Initialize the AugFlow pipeline
+experiment_id = 'exp1'
+
+
 pipe = Pipeline()
 
-# Configure the pipeline task for YOLO format, specifying the dataset path containing images and labels
+
 pipe.task(
     format='yolo',
-    dataset_path='your_dataset_path'
+    dataset_path='dataset_path_contains_data_dot_yaml_images_labels'
 )
 
-# Apply default rotation augmentations to the original dataset
-pipe.fuse(source_id='root', type='rotate', id='aug_rotate')
-
-# Apply translation augmentations and merge them into the final output
-pipe.fuse(source_id='root', type='translate', id='aug_translate', merge=True)
-
-# Create a 2x2 mosaic of rotated images with output dimensions of 1280x1280 pixels
-pipe.fuse(
-    source_id='aug_rotate',
-    type='mosaic',
-    id='mosaic_2by2',
-    output_dim=(1280, 1280),
-    merge=True
-)
-
-# Crop only the mosaic images that contain all polygons with their area exceeding 0.5% of the original image's area
-pipe.fuse(
-    source_id='mosaic_2by2',
-    type='crop',
-    min_relative_area=0.005,
-    merge=True
-)
-
-# Customize the mosaic configuration to create a 4x4 grid by copying and modifying the default settings
-mosaic_4by4 = copy.deepcopy(config.mosaic_default_config)
-mosaic_4by4['grid_size'] = (4, 4)
-
-# Apply the customized 4x4 mosaic augmentations and merge them into the final output
 pipe.fuse(
     source_id='root',
-    type='mosaic',
-    config=mosaic_4by4,
+    type='rotate',
+    id='aug_rotate',
+    config=example_custom_rotate_config,
     merge=True
 )
 
-# Apply cutout augmentations targeting images containing only objects from the 'scratch' class
-pipe.fuse(
-    source_id='root',
-    type='cutout',
-    focus={'include': ['scratch'], 'exclude': 'all_others'},
-    merge=True
-)
 
-# Define the output configuration for the pipeline, specifying YOLO format and the destination path
 pipe.out(
     format='yolo',
-    output_path=f'your_outpath_path/{experiment_id}',
+    output_path=f'output_path/{experiment_id}',
     ignore_masks=False,
     visualize_annotations=True
 )
+
 
 
   ```
