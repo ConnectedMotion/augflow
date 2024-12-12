@@ -3,9 +3,52 @@ import numpy as np
 import logging
 import os
 from shapely.geometry import Polygon
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from .unified_format import UnifiedAnnotation
 from .annotations import reshape_segmentation
+
+
+# augflow/utils/images.py
+
+
+def pad_image_to_size(image: np.ndarray, desired_size: Tuple[int, int], pad_color=(0, 0, 0)) -> Tuple[np.ndarray, int, int]:
+    """Pads the image to the desired size and returns padding offsets."""
+    img_h, img_w = image.shape[:2]
+    desired_w, desired_h = desired_size
+
+    pad_left = (desired_w - img_w) // 2
+    pad_right = desired_w - img_w - pad_left
+    pad_top = (desired_h - img_h) // 2
+    pad_bottom = desired_h - img_h - pad_top
+
+    padded_image = cv2.copyMakeBorder(
+        image,
+        top=int(pad_top),
+        bottom=int(pad_bottom),
+        left=int(pad_left),
+        right=int(pad_right),
+        borderType=cv2.BORDER_CONSTANT,
+        value=pad_color
+    )
+
+    return padded_image, int(pad_left), int(pad_top)
+
+
+def crop_image_direct(image: np.ndarray, crop_coords: Tuple[int, int, int, int]) -> np.ndarray:
+    """
+    Crop the image directly using the provided crop coordinates.
+
+    Args:
+        image (np.ndarray): The original image.
+        crop_coords (Tuple[int, int, int, int]): The crop coordinates (x, y, w, h).
+
+    Returns:
+        np.ndarray: The cropped image.
+    """
+    x, y, w, h = crop_coords
+    cropped_image = image[y:y + h, x:x + w]
+    return cropped_image
+
 
 def load_image(image_path: str) -> Optional[np.ndarray]:
     """

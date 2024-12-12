@@ -77,7 +77,9 @@ class Pipeline:
         id: Optional[str] = None,
         merge: bool = False,
         focus: Optional[Dict[str, Union[List[Union[int, str]], str]]] = None,
-        min_relative_area: Optional[float] = None
+        min_relative_area: Optional[float] = None,
+        min_width: Optional[int] = None,
+        min_height: Optional[int] = None
     ):
         """
         Apply an augmentation to the dataset.
@@ -91,6 +93,8 @@ class Pipeline:
             merge (bool, optional): Whether to include the augmented dataset in the final output.
             focus (dict, optional): Include or exclude specific categories.
             min_relative_area (float, optional): Minimum relative area threshold for annotations.
+            min_width (int, optional): Minimum width threshold for images.
+            min_height (int, optional): Minimum height threshold for images.
         """
         if id is None:
             id = f"aug_{len(self.augmentations)}"
@@ -171,6 +175,11 @@ class Pipeline:
         filtered_images = []
         filtered_annotations = []
         for img in source_dataset.images:
+            # First check the image dimensions
+            if (min_width is not None and img.width < min_width) or (min_height is not None and img.height < min_height):
+                logging.debug(f"Skipping image ID {img.id} due to insufficient dimensions ({img.width}x{img.height}).")
+                continue  # Skip this image
+
             anns = image_id_to_annotations.get(img.id, [])
 
             # Skip image if any annotation has category_id in exclude_categories
@@ -407,7 +416,7 @@ class Pipeline:
         output_path: str,
         ignore_masks: bool = False,
         visualize_annotations: bool = False,
-        reindex: bool = False 
+        reindex: bool = False
     ):
         """
         Output the augmented dataset in the specified format.
