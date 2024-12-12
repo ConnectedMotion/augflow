@@ -1,74 +1,98 @@
 # cutout.py
-import copy
 import os
+import copy
 import random
-import uuid
 import logging
+import cv2
 import numpy as np
-from shapely.geometry import Polygon, MultiPolygon, box
-from typing import List, Optional
-
-# Assume necessary imports from your project structure
-from augflow.pipeline import Pipeline
+from shapely.geometry import box, Polygon, MultiPolygon
+from shapely.ops import unary_union
+from .base import Augmentation  # Adjust the import based on your project structure
+from augflow.utils.images import load_image, save_image, mosaic_visualize_transformed_overlays
+from augflow.utils.annotations import (
+    calculate_area_reduction,
+    ensure_axis_aligned_rectangle,
+    passes_filter_scale
+)
+from augflow.utils.unified_format import UnifiedDataset, UnifiedImage, UnifiedAnnotation
+import uuid
+from typing import Optional, List, Dict
 from augflow.utils.configs import cutout_default_config
-from augflow.utils.dataset import UnifiedAnnotation, UnifiedImage, UnifiedDataset
-from augflow.utils.image_utils import load_image, save_image, calculate_area_reduction
-from augflow.utils.geometry_utils import ensure_axis_aligned_rectangle
-from augflow.utils.visualization import mosaic_visualize_transformed_overlays
 
-class CutoutAugmentor:
-    def __init__(self, config, task):
-        self.config = config
-        self.task = task
-        self.modes = self.config.get('modes', ['targeted'])
-        self.focus_categories = self.config.get('focus_categories', [])
-        self.cutout_probability = self.config.get('cutout_probability', 1.0)
-        self.num_augmented_images = self.config.get('num_augmented_images', 1)
-        self.num_cutouts_per_image = self.config.get('num_cutouts_per_image', 1)
-        self.cutout_size_percent = self.config.get('cutout_size_percent', ((0.1, 0.2), (0.1, 0.2)))
-        self.margin_percent = self.config.get('margin_percent', 0.05)
-        self.max_shift_percent = self.config.get('max_shift_percent', 1.0)
-        self.shift_steps = self.config.get('shift_steps', 20)
-        self.max_clipped_area_per_category = self.config.get('max_clipped_area_per_category', {})
-        self.random_seed = self.config.get('random_seed', None)
-        self.enable_cutout = self.config.get('enable_cutout', True)
-        self.visualize_overlays = self.config.get('visualize_overlays', False)
-        self.output_visualizations_dir = self.config.get('output_visualizations_dir', None)
-        self.output_images_dir = self.config.get('output_images_dir', None)
-        self.allowed_shifts = self.config.get('allowed_shifts', ['up', 'down', 'left', 'right'])
-        self.area_reduction_threshold = self.config.get('area_reduction_threshold', 0.1)
+class CutoutAugmentation(Augmentation):
+    def __init__(self, config=None, task: str = 'detection', modes: List[str] = None, focus_categories: Optional[List[str]] = None):
+        super().__init__()
+        self.task = task.lower()
+        self.config = cutout_default_config.copy()
+        if config:
+            self.config.update(config)
+        self.modes = [mode.lower() for mode in (modes or self.config.get('modes', []))]
+        self.focus_categories = focus_categories or self.config.get('focus_categories', [])
+        random.seed(self.config.get('random_seed', 42))
+        np.random.seed(self.config.get('random_seed', 42))
 
-        if self.random_seed is not None:
-            random.seed(self.random_seed)
+        # Ensure output directories exist
+        os.makedirs(self.config['output_images_dir'], exist_ok=True)
+        if self.config.get('visualize_overlays') and self.config.get('output_visualizations_dir'):
+            os.makedirs(self.config['output_visualizations_dir'], exist_ok=True)
 
-    def augment(self, dataset: UnifiedDataset) -> UnifiedDataset:
-        if not self.enable_cutout:
-            logging.info("Cutout augmentation is disabled in the configuration.")
-            return dataset
+        # Initialize max_clipped_area_per_category
+        self.max_clipped_area_per_category = self.config.get('max_clipped_area_per_category')
 
-        augmented_dataset = UnifiedDataset()
-        augmented_dataset.categories = dataset.categories.copy()
+    def apply(self, dataset: UnifiedDataset, output_dim: Optional[tuple] = None) -> UnifiedDataset:
+        if not self.config.get('enable_cutout', True):
+            logging.info("Cutout augmentation is disabled.")
+            return dataset  # Return the original dataset
 
-        category_name_to_id = {cat.name: cat.id for cat in dataset.categories}
-        logging.debug(f"Category name to ID mapping: {category_name_to_id}")
+        augmented_dataset = UnifiedDataset(
+            images=[],
+            annotations=[],
+            categories=copy.deepcopy(dataset.categories)
+        )
+
+        # Get the maximum existing image and annotation IDs
+        existing_image_ids = [img.id for img in dataset.images]
+        existing_annotation_ids = [ann.id for ann in dataset.annotations]
+        image_id_offset = max(existing_image_ids) + 1 if existing_image_ids else 1
+        annotation_id_offset = max(existing_annotation_ids) + 1 if existing_annotation_ids else 1
+
+        # Create a mapping from image_id to annotations
+        image_id_to_annotations = {}
+        for ann in dataset.annotations:
+            image_id_to_annotations.setdefault(ann.image_id, []).append(ann)
+
+        # Define max_clipped_area_per_category if not provided
+        if not self.max_clipped_area_per_category:
+            # Assign a default value if not specified, e.g., 0.3 (30%) for all categories
+            self.max_clipped_area_per_category = {cat['id']: 0.3 for cat in dataset.categories}
 
         max_clipped_area_per_category = self.max_clipped_area_per_category
-        if not max_clipped_area_per_category:
-            # Set default maximum area reduction per category to 50%
-            max_clipped_area_per_category = {cat.id: 0.5 for cat in dataset.categories}
 
-        image_id_offset = max([img.id for img in dataset.images], default=0) + 1
-        annotation_id_offset = max([ann.id for ann in dataset.annotations], default=0) + 1
+        # Create mapping from category names to IDs
+        category_name_to_id = {cat['name']: cat['id'] for cat in dataset.categories}
+        logging.debug(f"Category name to ID mapping: {category_name_to_id}")
 
         for img in dataset.images:
-            anns = [ann for ann in dataset.annotations if ann.image_id == img.id]
-            image = load_image(img.file_name)
+            image_path = img.file_name
+            image = load_image(image_path)
             if image is None:
-                logging.warning(f"Image '{img.file_name}' could not be loaded. Skipping.")
+                logging.error(f"Failed to load image '{image_path}'. Skipping.")
                 continue
             img_h, img_w = image.shape[:2]
-            output_dim = (img_w, img_h)
+
+            anns = image_id_to_annotations.get(img.id, [])
+
+            # Initialize a set to track used shifts for this image
             used_shifts = set()
+
+            if 'non_targeted' in self.modes:
+                self.apply_non_targeted(
+                    img, image, anns, img_w, img_h, image_id_offset, annotation_id_offset,
+                    augmented_dataset, max_clipped_area_per_category, output_dim, used_shifts
+                )
+                # Update offsets
+                image_id_offset = max([img.id for img in augmented_dataset.images], default=image_id_offset) + 1
+                annotation_id_offset = max([ann.id for ann in augmented_dataset.annotations], default=annotation_id_offset) + 1
 
             if 'targeted' in self.modes:
                 self.apply_targeted(
@@ -83,9 +107,54 @@ class CutoutAugmentor:
         logging.info(f"Cutout augmentation completed.")
         return augmented_dataset
 
+    def apply_non_targeted(self, img, image, anns, img_w, img_h, image_id_offset, annotation_id_offset,
+                           augmented_dataset, max_clipped_area_per_category, output_dim, used_shifts):
+        num_augmented_images = self.config['num_augmented_images']
+        image_successful_aug = 0
+
+        while image_successful_aug < num_augmented_images:
+            cutout_applied = False
+            # Decide whether to apply cutout based on probability
+            prob = self.config['cutout_probability']
+            if random.random() > prob:
+                logging.info(f"Skipping cutout augmentation {image_successful_aug+1} for image ID {img.id} based on probability ({prob}).")
+                continue  # Skip this augmentation
+
+            # Apply Random Cutout
+            augmented_image, masks = self.apply_random_cutout(
+                image=image,
+                img_w=img_w,
+                img_h=img_h,
+                num_cutouts=self.config['num_cutouts_per_image'],
+                cutout_size_percent=self.config['cutout_size_percent'],
+                used_shifts=used_shifts
+            )
+
+            if not masks:
+                logging.info(f"No cutouts applied for augmentation {image_successful_aug+1} on image ID {img.id}. Skipping augmentation.")
+                continue
+
+            # Now, process annotations and decide whether to keep the augmented image
+            success = self.process_cutout(
+                img, augmented_image, anns, masks, img_w, img_h,
+                image_id_offset, annotation_id_offset, augmented_dataset,
+                max_clipped_area_per_category, output_dim, focus_category_ids=None
+            )
+            if success:
+                image_id_offset += 1
+                annotation_id_offset += len(anns)
+                image_successful_aug += 1
+                cutout_applied = True
+            else:
+                logging.info(f"Cutout augmentation for image ID {img.id} discarded during processing.")
+                break  # No valid cutouts left to try
+            if not cutout_applied:
+                break  # No valid cutouts left to try
+
     def apply_targeted(self, img, image, anns, img_w, img_h, image_id_offset, annotation_id_offset,
                        augmented_dataset, max_clipped_area_per_category, output_dim, used_shifts,
                        category_name_to_id):
+        # For targeted mode, focus on specific categories
         if not self.focus_categories:
             logging.warning("No focus categories provided for targeted mode.")
             return
@@ -95,17 +164,20 @@ class CutoutAugmentor:
             return
         logging.debug(f"Focus category IDs: {focus_category_ids}")
 
-        image_successful_aug = 0
-        max_attempts = self.num_augmented_images * 5  # To prevent infinite loops
+        num_augmented_images = self.config['num_augmented_images']
 
-        attempts = 0
-        while image_successful_aug < self.num_augmented_images and attempts < max_attempts:
-            attempts += 1
-            # Create cutouts for each focus annotation
+        # Identify annotations of focus categories
+        focus_anns = [ann for ann in anns if ann.category_id in focus_category_ids]
+        if not focus_anns:
+            logging.info(f"No focus category annotations in image ID {img.id}. Skipping.")
+            return
+
+        image_successful_aug = 0
+
+        while image_successful_aug < num_augmented_images:
+            # For each focus annotation, create a cutout that covers it completely with safety margin
             cutouts = []
             for ann in anns:
-                if ann.category_id not in focus_category_ids:
-                    continue  # Only process focus categories
                 coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
                 if not coords:
                     continue  # Skip if coordinates are invalid
@@ -115,66 +187,66 @@ class CutoutAugmentor:
                 minx, miny, maxx, maxy = ann_poly.bounds
 
                 # Add safety margin
-                margin = self.margin_percent
+                margin = self.config.get('margin_percent', 0.05)  # 5% of image size
                 x1 = max(int(minx - margin * img_w), 0)
                 y1 = max(int(miny - margin * img_h), 0)
                 x2 = min(int(maxx + margin * img_w), img_w)
                 y2 = min(int(maxy + margin * img_h), img_h)
 
-                cutout = {
-                    'ann': ann,
-                    'bbox': (x1, y1, x2, y2),
-                    'category_id': ann.category_id,
-                    'is_focus': True,
-                    'shifted_bbox': None  # To store the final shifted bbox
-                }
+                cutout = {'ann': ann, 'bbox': (x1, y1, x2, y2)}
                 cutouts.append(cutout)
 
-            if not cutouts:
-                logging.info(f"No focus annotations to process in image ID {img.id}. Skipping.")
-                break
+            # Now, for focus annotations, shift the cutout to cause clipping just below max allowed
+            # For non-focus annotations, keep the cutout in place
 
-            # Randomly select one focus cutout to fully mask out
-            focus_cutout = random.choice(cutouts)
-            focus_cutout['action'] = 'full_mask'
+            # For each focus annotation, we need to find shifts that cause the desired clipping
+            shifted_cutouts = []
+            for cutout in cutouts:
+                ann = cutout['ann']
+                x1, y1, x2, y2 = cutout['bbox']
+                category_id = ann.category_id
 
-            # Randomly select another focus cutout to partially mask (clip)
-            other_focus_cutouts = [c for c in cutouts if c != focus_cutout]
-            if other_focus_cutouts:
-                partial_cutout = random.choice(other_focus_cutouts)
-                partial_cutout['action'] = 'partial_mask'
-            else:
-                logging.info(f"Not enough focus annotations to perform both full and partial masking in image ID {img.id}.")
-                continue
+                if category_id in focus_category_ids:
+                    # Shift the cutout in varying directions and distances
+                    best_shift = self.find_best_shift_for_cutout(
+                        ann, (x1, y1, x2, y2), img_w, img_h, max_clipped_area_per_category, used_shifts
+                    )
+                    if best_shift is None:
+                        logging.info(f"Could not find suitable shift for annotation ID {ann.id} in image ID {img.id}.")
+                        continue  # Skip this annotation
+                    shift = best_shift
+                    # Apply shift to cutout bbox
+                    x1_shifted = x1 + shift[0]
+                    y1_shifted = y1 + shift[1]
+                    x2_shifted = x2 + shift[0]
+                    y2_shifted = y2 + shift[1]
+                    # Ensure the shifted bbox is within image boundaries
+                    x1_shifted = max(0, x1_shifted)
+                    y1_shifted = max(0, y1_shifted)
+                    x2_shifted = min(img_w, x2_shifted)
+                    y2_shifted = min(img_h, y2_shifted)
+                    shifted_cutouts.append((x1_shifted, y1_shifted, x2_shifted, y2_shifted))
+                    used_shifts.add(shift)
+                else:
+                    # Non-focus categories, keep the cutout in place
+                    shifted_cutouts.append((x1, y1, x2, y2))
 
-            # Prepare masks
-            masks = []
+            if not shifted_cutouts:
+                logging.info(f"No valid cutouts for image ID {img.id}. Skipping.")
+                return
+
+            # Apply the cutouts to the image
             augmented_image = image.copy()
+            for x1, y1, x2, y2 in shifted_cutouts:
+                augmented_image[int(y1):int(y2), int(x1):int(x2)] = 0
 
-            # Apply full mask to focus_cutout
-            x1, y1, x2, y2 = focus_cutout['bbox']
-            augmented_image[y1:y2, x1:x2] = 0
-            masks.append((x1, y1, x2, y2))
-
-            # Apply partial mask to partial_cutout by shifting its bbox randomly
-            shift_x = random.randint(-int(self.max_shift_percent * img_w), int(self.max_shift_percent * img_w))
-            shift_y = random.randint(-int(self.max_shift_percent * img_h), int(self.max_shift_percent * img_h))
-            x1_p, y1_p, x2_p, y2_p = partial_cutout['bbox']
-            x1_p_shifted = max(0, min(x1_p + shift_x, img_w))
-            y1_p_shifted = max(0, min(y1_p + shift_y, img_h))
-            x2_p_shifted = max(0, min(x2_p + shift_x, img_w))
-            y2_p_shifted = max(0, min(y2_p + shift_y, img_h))
-
-            augmented_image[int(y1_p_shifted):int(y2_p_shifted), int(x1_p_shifted):int(x2_p_shifted)] = 0
-            masks.append((x1_p_shifted, y1_p_shifted, x2_p_shifted, y2_p_shifted))
+            masks = shifted_cutouts
 
             # Now, process annotations and decide whether to keep the augmented image
             success = self.process_cutout(
                 img, augmented_image, anns, masks, img_w, img_h,
                 image_id_offset, annotation_id_offset, augmented_dataset,
-                max_clipped_area_per_category, output_dim, focus_category_ids=focus_category_ids,
-                focus_cutout_id=focus_cutout['ann'].id,
-                partial_cutout_id=partial_cutout['ann'].id
+                max_clipped_area_per_category, output_dim, focus_category_ids=focus_category_ids
             )
             if success:
                 image_id_offset += 1
@@ -182,12 +254,136 @@ class CutoutAugmentor:
                 image_successful_aug += 1
             else:
                 logging.info(f"Cutout augmentation for image ID {img.id} discarded during processing.")
-                continue  # Try another attempt
+                break  # No valid shifts left to try
 
-        if image_successful_aug < self.num_augmented_images:
-            logging.info(f"Could not generate {self.num_augmented_images} unique augmentations for image ID {img.id}. Generated {image_successful_aug} instead.")
+        if image_successful_aug < num_augmented_images:
+            logging.info(f"Could not generate {num_augmented_images} unique augmentations for image ID {img.id}. Generated {image_successful_aug} instead.")
 
-    def process_cutout(self, img, augmented_image, anns, masks, img_w, img_h, image_id_offset, annotation_id_offset, augmented_dataset, max_clipped_area_per_category, output_dim, focus_category_ids, focus_cutout_id, partial_cutout_id):
+    def find_best_shift_for_cutout(self, ann, bbox, img_w, img_h, max_clipped_area_per_category, used_shifts):
+        x1, y1, x2, y2 = bbox
+        category_id = ann.category_id
+        max_allowed_reduction = max_clipped_area_per_category.get(category_id, 0.3)  # Default to 30%
+
+        # Define possible directions and distances
+        max_shift_distance_x = self.config.get('max_shift_percent', 1.0) * img_w
+        max_shift_distance_y = self.config.get('max_shift_percent', 1.0) * img_h
+
+        shift_steps = self.config.get('shift_steps', 20)
+
+        # Possible directions: left, right, up, down
+        directions = ['left', 'right', 'up', 'down']
+
+        best_shift = None
+        min_diff = float('inf')  # Difference between area reduction and max_allowed_reduction
+
+        for direction in directions:
+            if direction == 'left':
+                shift_x_range = np.linspace(0, -max_shift_distance_x, shift_steps)
+                shift_y_range = [0]
+            elif direction == 'right':
+                shift_x_range = np.linspace(0, max_shift_distance_x, shift_steps)
+                shift_y_range = [0]
+            elif direction == 'up':
+                shift_x_range = [0]
+                shift_y_range = np.linspace(0, -max_shift_distance_y, shift_steps)
+            elif direction == 'down':
+                shift_x_range = [0]
+                shift_y_range = np.linspace(0, max_shift_distance_y, shift_steps)
+            else:
+                continue
+
+            for shift_x in shift_x_range:
+                for shift_y in shift_y_range:
+                    shift_key = (shift_x, shift_y)
+                    if shift_key in used_shifts:
+                        continue
+
+                    # Shift the cutout bbox
+                    x1_shifted = x1 + shift_x
+                    y1_shifted = y1 + shift_y
+                    x2_shifted = x2 + shift_x
+                    y2_shifted = y2 + shift_y
+
+                    # Ensure the shifted bbox is within image boundaries
+                    x1_shifted = max(0, x1_shifted)
+                    y1_shifted = max(0, y1_shifted)
+                    x2_shifted = min(img_w, x2_shifted)
+                    y2_shifted = min(img_h, y2_shifted)
+
+                    # If the shifted cutout does not overlap the polygon at all, skip
+                    shifted_cutout_poly = box(x1_shifted, y1_shifted, x2_shifted, y2_shifted)
+                    ann_poly_coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
+                    if not ann_poly_coords:
+                        continue
+                    ann_poly = Polygon(ann_poly_coords)
+                    if not ann_poly.is_valid:
+                        ann_poly = ann_poly.buffer(0)
+                    if not ann_poly.intersects(shifted_cutout_poly):
+                        continue  # No overlap, move to next shift
+
+                    # Create the shifted cutout polygon
+                    cutout_poly = box(x1_shifted, y1_shifted, x2_shifted, y2_shifted)
+
+                    # Clip the annotation polygon with the cutout polygon
+                    clipped_poly = ann_poly.difference(cutout_poly)
+
+                    if clipped_poly.is_empty:
+                        new_area = 0
+                    else:
+                        new_area = clipped_poly.area
+
+                    original_area = ann_poly.area
+                    area_reduction_due_to_clipping = calculate_area_reduction(original_area, new_area)
+
+                    logging.debug(f"Trying shift ({shift_x}, {shift_y}) for annotation ID {ann.id} with area reduction {area_reduction_due_to_clipping}")
+
+                    # We want area_reduction_due_to_clipping just below max_allowed_reduction
+                    if area_reduction_due_to_clipping > max_allowed_reduction:
+                        continue  # Exceeds max allowed reduction
+
+                    diff = max_allowed_reduction - area_reduction_due_to_clipping
+                    if 0 <= diff < min_diff:
+                        min_diff = diff
+                        best_shift = (shift_x, shift_y)
+                        if min_diff == 0:
+                            return best_shift  # Found the perfect shift
+
+        return best_shift
+
+    def apply_random_cutout(self, image: np.ndarray, img_w: int, img_h: int, num_cutouts: int, cutout_size_percent: tuple, used_shifts=None):
+        augmented_image = image.copy()
+        masks = []
+
+        for _ in range(num_cutouts):
+            # Randomly choose the size of the cutout based on percentage
+            height_percent = random.uniform(cutout_size_percent[0][0], cutout_size_percent[0][1])
+            width_percent = random.uniform(cutout_size_percent[1][0], cutout_size_percent[1][1])
+            height = int(height_percent * img_h)
+            width = int(width_percent * img_w)
+
+            # Randomly choose the top-left corner of the cutout
+            x1 = random.randint(0, max(img_w - width, 0))
+            y1 = random.randint(0, max(img_h - height, 0))
+            x2 = x1 + width
+            y2 = y1 + height
+
+            mask_key = (x1, y1, x2, y2)
+            if used_shifts is not None and mask_key in used_shifts:
+                continue  # Skip if we've already used this mask
+            if used_shifts is not None:
+                used_shifts.add(mask_key)
+
+            # Apply the cutout (mask with black color)
+            augmented_image[y1:y2, x1:x2] = 0
+
+            # Save the mask for annotation handling
+            mask = (x1, y1, x2, y2)
+            masks.append(mask)
+            logging.debug(f"Applied random cutout: Top-left=({x1}, {y1}), Bottom-right=({x2}, {y2})")
+
+        return augmented_image, masks
+
+    def process_cutout(self, img, augmented_image, anns, masks, img_w, img_h, image_id_offset, annotation_id_offset, augmented_dataset, max_clipped_area_per_category, output_dim, focus_category_ids):
         # Create mask polygons for annotation clipping
         mask_polygons = [box(x1, y1, x2, y2) for (x1, y1, x2, y2) in masks]
 
@@ -209,11 +405,11 @@ class CutoutAugmentor:
 
         discard_augmentation = False  # Flag to decide whether to discard the entire augmentation
 
-        focus_polygons_clipped = 0
+        self.significant_clipping_occurred_on_focus_categories = False
 
         for ann in transformed_annotations:
             category_id = ann.category_id
-            max_allowed_reduction = max_clipped_area_per_category.get(category_id, 0.5)  # Default to 50% reduction
+            max_allowed_reduction = max_clipped_area_per_category.get(category_id, 0.3)  # Allow up to 30% reduction
             coords = list(zip(ann.polygon[0::2], ann.polygon[1::2]))
             if not coords:
                 logging.warning(f"Empty polygon for annotation ID {ann.id} in image ID {img.id}. Skipping annotation.")
@@ -226,56 +422,10 @@ class CutoutAugmentor:
             original_area = ann_poly.area
 
             if clipped_poly.is_empty:
-                new_area = 0
-                area_reduction_due_to_clipping = 1.0
-            else:
-                new_area = clipped_poly.area
-                area_reduction_due_to_clipping = calculate_area_reduction(original_area, new_area)
+                logging.info(f"Annotation ID {ann.id} in image ID {img.id} is fully masked out by cutout. Skipping annotation.")
+                continue  # Annotation is fully masked out
 
-            is_focus_category = category_id in focus_category_ids
-            is_focus_cutout = ann.id == focus_cutout_id
-            is_partial_cutout = ann.id == partial_cutout_id
-
-            if is_focus_category:
-                if is_focus_cutout:
-                    # Focus polygon that is fully masked out (acceptable)
-                    if area_reduction_due_to_clipping < 1.0:
-                        # Should be fully masked out
-                        logging.info(f"Focus annotation ID {ann.id} in image ID {img.id} was not fully masked out as expected.")
-                        discard_augmentation = True
-                        break
-                elif is_partial_cutout:
-                    # Focus polygon that should be partially masked
-                    if area_reduction_due_to_clipping == 1.0:
-                        # Should not be fully masked out
-                        logging.info(f"Focus annotation ID {ann.id} in image ID {img.id} was fully masked out, expected partial masking.")
-                        discard_augmentation = True
-                        break
-                    elif area_reduction_due_to_clipping == 0.0:
-                        # Not clipped at all
-                        logging.info(f"Focus annotation ID {ann.id} in image ID {img.id} was not clipped at all, expected partial masking.")
-                        discard_augmentation = True
-                        break
-                    else:
-                        focus_polygons_clipped += 1
-                else:
-                    # Other focus polygons should remain unaffected
-                    if area_reduction_due_to_clipping > 0.0:
-                        logging.info(f"Focus annotation ID {ann.id} in image ID {img.id} was unexpectedly clipped.")
-                        discard_augmentation = True
-                        break
-            else:
-                # Non-focus polygons can be fully masked out or clipped up to the maximum allowed area reduction
-                if area_reduction_due_to_clipping > max_allowed_reduction:
-                    logging.info(f"Non-focus annotation ID {ann.id} in image ID {img.id} exceeds max allowed area reduction.")
-                    discard_augmentation = True
-                    break
-
-            is_polygon_clipped = area_reduction_due_to_clipping > 0.01
-
-            if clipped_poly.is_empty:
-                continue  # Skip empty geometries
-
+            # Handle MultiPolygon cases
             if isinstance(clipped_poly, Polygon):
                 polygons_to_process = [clipped_poly]
             elif isinstance(clipped_poly, MultiPolygon):
@@ -285,11 +435,23 @@ class CutoutAugmentor:
                 continue  # Unsupported geometry type
 
             for poly in polygons_to_process:
-                if not poly.is_valid or poly.is_empty:
-                    continue  # Skip invalid or empty geometries
-
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
                 new_area = poly.area
                 area_reduction_due_to_clipping = calculate_area_reduction(original_area, new_area)
+
+                logging.debug(f"Annotation ID {ann.id}, category ID {category_id}, area reduction due to clipping: {area_reduction_due_to_clipping}, max allowed reduction: {max_allowed_reduction}")
+
+                if area_reduction_due_to_clipping > max_allowed_reduction:
+                    logging.warning(f"Cutout augmentation for image ID {img.id} discarded due to area reduction ({area_reduction_due_to_clipping:.6f}) exceeding threshold ({max_allowed_reduction}) for category {category_id}.")
+                    discard_augmentation = True
+                    break  # Discard the entire augmentation
+
+                if focus_category_ids and category_id in focus_category_ids:
+                    # Check if significant clipping occurred (e.g., more than 50% of max allowed)
+                    if area_reduction_due_to_clipping >= max_allowed_reduction * 0.5:
+                        self.significant_clipping_occurred_on_focus_categories = True
+
                 is_polygon_clipped = area_reduction_due_to_clipping > 0.01
 
                 if self.task == 'detection':
@@ -328,23 +490,23 @@ class CutoutAugmentor:
                 annotation_id_offset += 1
 
             if discard_augmentation:
-                logging.info(f"Cutout augmentation for image ID {img.id} discarded due to improper clipping.")
+                logging.info(f"Cutout augmentation for image ID {img.id} discarded due to high area reduction.")
                 return False  # Discard the entire augmentation
-
-        # Acceptance Criteria
-        if focus_polygons_clipped == 0:
-            logging.info(f"No focus polygons were clipped as expected in image ID {img.id}. Skipping augmentation.")
-            return False
 
         # If no polygons remain after masking, skip augmentation
         if not cleaned_anns:
             logging.info(f"Cutout augmentation for image ID {img.id} results in all polygons being fully masked. Skipping augmentation.")
             return False
 
+        # In targeted mode, discard images that do not cause significant clipping on focus categories
+        if focus_category_ids and not self.significant_clipping_occurred_on_focus_categories:
+            logging.info(f"No significant clipping occurred on focus categories for image ID {img.id}. Skipping augmentation.")
+            return False
+
         # Generate new filename
         filename, ext = os.path.splitext(os.path.basename(img.file_name))
         new_filename = f"{filename}_cutout_aug{uuid.uuid4().hex}{ext}"
-        output_image_path = os.path.join(self.output_images_dir, new_filename)
+        output_image_path = os.path.join(self.config['output_images_dir'], new_filename)
 
         # Save augmented image
         save_success = save_image(augmented_image, output_image_path)
@@ -367,12 +529,12 @@ class CutoutAugmentor:
             logging.info(f"Added annotation ID {new_ann.id} for image ID {image_id_offset}.")
 
         # Visualization
-        if self.visualize_overlays and self.output_visualizations_dir:
+        if self.config['visualize_overlays'] and self.config['output_visualizations_dir']:
             visualization_filename = f"{os.path.splitext(new_filename)[0]}_viz{ext}"
             mosaic_visualize_transformed_overlays(
                 transformed_image=augmented_image.copy(),
                 cleaned_annotations=cleaned_anns,
-                output_visualizations_dir=self.output_visualizations_dir,
+                output_visualizations_dir=self.config['output_visualizations_dir'],
                 new_filename=visualization_filename,
                 task=self.task
             )
