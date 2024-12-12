@@ -158,7 +158,11 @@ After creating your virtual env you can **Install AugFlow** using one of the fol
 
 ### 🎯 Quick Start Example
 
-The following example demonstrates how to use AugFlow's Pipeline to apply a tree of augmentations to a YOLO-formatted dataset. This pipeline includes rotations, translations, mosaics, crops, and cutouts to enhance the diversity and robustness of a target dataset. After running your experiment, you will receive detailed logs about the flow, saved in the **augflow_pipeline.log** file.
+The following example demonstrates how to use AugFlow's Pipeline to apply Augmentations to coco 128 dataset.
+
+**First, download the COCO128 dataset from the following [Google Drive link](https://drive.google.com/file/d/1xiH3vwa2ZpgmytmuVA00M6FGA3DXmGUH/view?usp=sharing), extract it, and run the example.**
+
+After running your experiment, you will get detailed logs about the flow, saved in the **augflow_pipeline.log** file.
 
   ```bash
     
